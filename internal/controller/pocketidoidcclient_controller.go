@@ -1,0 +1,288 @@
+package controller
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"slices"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	pocketidv1alpha1 "github.com/tobiash/pocketid-operator/api/v1alpha1"
+	"github.com/tobiash/pocketid-operator/internal/pocketid"
+)
+
+const oidcClientFinalizer = "pocketid.tobiash.github.io/finalizer"
+
+// PocketIDOIDCClientReconciler reconciles a PocketIDOIDCClient object
+type PocketIDOIDCClientReconciler struct {
+	client.Client
+	Scheme *runtime.Scheme
+}
+
+// +kubebuilder:rbac:groups=pocketid.tobiash.github.io,resources=pocketidoidcclients,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=pocketid.tobiash.github.io,resources=pocketidoidcclients/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=pocketid.tobiash.github.io,resources=pocketidoidcclients/finalizers,verbs=update
+// +kubebuilder:rbac:groups=pocketid.tobiash.github.io,resources=pocketidusergroups,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+
+func (r *PocketIDOIDCClientReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	oidcClient := &pocketidv1alpha1.PocketIDOIDCClient{}
+	if err := r.Get(ctx, req.NamespacedName, oidcClient); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// Fetch the PocketIDInstance (may be cross-namespace)
+	instance, err := ResolveInstanceReference(ctx, r.Client, oidcClient.Spec.InstanceRef, oidcClient.Namespace)
+	if err != nil {
+		logger.Error(err, "Failed to get PocketIDInstance")
+		return ctrl.Result{}, err
+	}
+
+	// Validate cross-namespace reference
+	allowed, reason, err := ValidateCrossNamespaceReference(ctx, r.Client, instance, oidcClient.Namespace)
+	if err != nil {
+		logger.Error(err, "Failed to validate cross-namespace reference")
+		return ctrl.Result{}, err
+	}
+	if !allowed {
+		logger.Info("Cross-namespace reference denied", "reason", reason)
+		// TODO: Set condition on status
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Helper to create API client
+	apiClient, err := r.getAPIClient(ctx, instance)
+	if err != nil {
+		logger.Error(err, "Failed to create API client")
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
+	// Handle deletion
+	if !oidcClient.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(oidcClient, oidcClientFinalizer) {
+			if oidcClient.Status.ClientID != "" {
+				if err := apiClient.DeleteOIDCClient(ctx, oidcClient.Status.ClientID); err != nil {
+					// IsNotFound check would be good here, but strict error checking requires parsing
+					logger.Error(err, "Failed to delete OIDC client from API")
+					// We might want to continue even if delete fails, or retry
+				}
+			}
+
+			controllerutil.RemoveFinalizer(oidcClient, oidcClientFinalizer)
+			if err := r.Update(ctx, oidcClient); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Add finalizer
+	if !controllerutil.ContainsFinalizer(oidcClient, oidcClientFinalizer) {
+		controllerutil.AddFinalizer(oidcClient, oidcClientFinalizer)
+		if err := r.Update(ctx, oidcClient); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	// Sync logic
+	var pocketIDClient *pocketid.OIDCClient
+
+	// Check if client exists
+	if oidcClient.Status.ClientID != "" {
+		pocketIDClient, err = apiClient.GetOIDCClient(ctx, oidcClient.Status.ClientID)
+		if err != nil {
+			logger.Error(err, "Failed to get OIDC client from API")
+			// If 404, we should clear ID and recreate
+			// For now, assume error and requeue
+			return ctrl.Result{}, err
+		}
+	} else {
+		// Try to find by name (requires listing all clients)
+		clients, err := apiClient.ListOIDCClients(ctx)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		for _, c := range clients {
+			if c.Name == oidcClient.Spec.Name {
+				pocketIDClient = &c
+				break
+			}
+		}
+	}
+
+	// Create or Update
+	targetClient := &pocketid.OIDCClient{
+		Name:         oidcClient.Spec.Name,
+		ClientID:     oidcClient.Spec.ClientID,
+		IsPublic:     oidcClient.Spec.IsPublic,
+		RedirectURIs: oidcClient.Spec.CallbackURLs,
+	}
+	// TODO: Handle LogoutCallbackURLs if supported by API type (I put RedirectURIs in type, not logout)
+
+	if pocketIDClient == nil {
+		// Create
+		logger.Info("Creating OIDC Client", "name", targetClient.Name)
+		created, err := apiClient.CreateOIDCClient(ctx, targetClient)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		pocketIDClient = created
+		// Store the internal DB ID (used for updates, secrets)
+		// This is the ID that PocketID uses internally
+		oidcClient.Status.ClientID = created.ID
+	} else {
+		// Update
+		// Basic check if update needed (could be optimized)
+		targetClient.ID = pocketIDClient.ID
+		if pocketIDClient.Name != targetClient.Name || !equalStrings(pocketIDClient.RedirectURIs, targetClient.RedirectURIs) {
+			logger.Info("Updating OIDC Client", "id", pocketIDClient.ID)
+			updated, err := apiClient.UpdateOIDCClient(ctx, pocketIDClient.ID, targetClient)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			pocketIDClient = updated
+		}
+	}
+
+	// Handle Client Secret
+	if !oidcClient.Spec.IsPublic && oidcClient.Spec.CredentialsSecretRef != nil {
+		secretName := oidcClient.Spec.CredentialsSecretRef.Name
+		secret := &corev1.Secret{}
+		err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: oidcClient.Namespace}, secret)
+
+		secretNeedsUpdate := false
+		if apierrors.IsNotFound(err) {
+			secret = &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      secretName,
+					Namespace: oidcClient.Namespace,
+				},
+				Type: corev1.SecretTypeOpaque,
+				Data: map[string][]byte{},
+			}
+			if err := controllerutil.SetControllerReference(oidcClient, secret, r.Scheme); err != nil {
+				return ctrl.Result{}, err
+			}
+			secretNeedsUpdate = true
+		} else if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		if _, ok := secret.Data["OIDC_CLIENT_SECRET"]; !ok || secretNeedsUpdate {
+			// Generate new secret
+			logger.Info("Generating new client secret", "client", pocketIDClient.ID)
+			clientSecret, err := apiClient.GenerateClientSecret(ctx, pocketIDClient.ID)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+
+			if secret.Data == nil {
+				secret.Data = make(map[string][]byte)
+			}
+			secret.Data["OIDC_CLIENT_ID"] = []byte(pocketIDClient.ID)
+			secret.Data["OIDC_CLIENT_SECRET"] = []byte(clientSecret)
+			secret.Data["OIDC_ISSUER_URL"] = []byte(instance.Spec.AppURL)
+
+			if secretNeedsUpdate {
+				if err := r.Create(ctx, secret); err != nil {
+					return ctrl.Result{}, err
+				}
+			} else {
+				if err := r.Update(ctx, secret); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			oidcClient.Status.CredentialsSecretName = secretName
+		}
+	}
+
+	// Update Status - ClientID was already set during create/update
+	oidcClient.Status.Ready = true
+	oidcClient.Status.Synced = true
+	now := metav1.Now()
+	oidcClient.Status.LastSyncTime = &now
+
+	meta.SetStatusCondition(&oidcClient.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionTrue,
+		Reason:             "Synced",
+		Message:            "OIDC Client synced successfully",
+		ObservedGeneration: oidcClient.Generation,
+	})
+
+	if err := r.Status().Update(ctx, oidcClient); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+}
+
+func (r *PocketIDOIDCClientReconciler) getAPIClient(ctx context.Context, instance *pocketidv1alpha1.PocketIDInstance) (*pocketid.Client, error) {
+	// Simple client creation logic, can be enhanced with caching
+
+	// Get Secret
+	secret := &corev1.Secret{}
+	// Use the status secret name if available, else fallback or error
+	secretName := instance.Status.StaticAPIKeySecretName
+	if secretName == "" {
+		secretName = instance.Name + "-api-key" // Fallback guess
+	}
+
+	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: instance.Namespace}, secret); err != nil {
+		return nil, fmt.Errorf("failed to get API key secret: %w", err)
+	}
+
+	apiKey := string(secret.Data["STATIC_API_KEY"])
+
+	// URL construction
+	// Access via internal service
+	baseUrl := fmt.Sprintf("http://%s-svc.%s.svc.cluster.local", instance.Name, instance.Namespace)
+
+	// If running locally (not in cluster), default to localhost forward
+	if os.Getenv("KUBERNETES_SERVICE_HOST") == "" {
+		// Check if we can reach the in-cluster DNS provided for convenience, otherwise fallback
+		// Use env var for testing/custom local setup
+		baseUrl = os.Getenv("POCKETID_DEV_API_URL")
+		if baseUrl == "" {
+			baseUrl = "http://localhost:8080"
+		}
+	}
+
+	return pocketid.NewClient(baseUrl, apiKey), nil
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	aSorted := make([]string, len(a))
+	bSorted := make([]string, len(b))
+	copy(aSorted, a)
+	copy(bSorted, b)
+	slices.Sort(aSorted)
+	slices.Sort(bSorted)
+	for i := range aSorted {
+		if aSorted[i] != bSorted[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *PocketIDOIDCClientReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&pocketidv1alpha1.PocketIDOIDCClient{}).
+		Complete(r)
+}

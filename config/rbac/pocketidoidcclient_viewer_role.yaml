@@ -1,0 +1,23 @@
+# permissions for end users to view pocketidoidcclients.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: pocketid-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: pocketidoidcclient-viewer-role
+rules:
+- apiGroups:
+  - pocketid.pocketid.tobiash.github.io
+  resources:
+  - pocketidoidcclients
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - pocketid.pocketid.tobiash.github.io
+  resources:
+  - pocketidoidcclients/status
+  verbs:
+  - get

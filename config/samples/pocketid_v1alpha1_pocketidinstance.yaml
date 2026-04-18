@@ -1,0 +1,18 @@
+apiVersion: pocketid.tobiash.github.io/v1alpha1
+kind: PocketIDInstance
+metadata:
+  labels:
+    app.kubernetes.io/name: pocketid-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: test
+spec:
+  appUrl: "https://auth.example.com"
+  image: "ghcr.io/pocket-id/pocket-id:latest"
+  replicas: 1
+  trustProxy: true
+  sessionDuration: 60
+  database:
+    provider: sqlite
+  storage:
+    pvc:
+      size: "1Gi"

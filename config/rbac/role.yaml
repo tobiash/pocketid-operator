@@ -1,0 +1,84 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - persistentvolumeclaims
+  - secrets
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - statefulsets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - gateway.networking.k8s.io
+  resources:
+  - httproutes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - pocketid.tobiash.github.io
+  resources:
+  - pocketidinstances
+  - pocketidoidcclients
+  - pocketidusergroups
+  - pocketidusers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - pocketid.tobiash.github.io
+  resources:
+  - pocketidinstances/finalizers
+  - pocketidoidcclients/finalizers
+  - pocketidusergroups/finalizers
+  - pocketidusers/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - pocketid.tobiash.github.io
+  resources:
+  - pocketidinstances/status
+  - pocketidoidcclients/status
+  - pocketidusergroups/status
+  - pocketidusers/status
+  verbs:
+  - get
+  - patch
+  - update

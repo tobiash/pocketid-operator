@@ -1,0 +1,15 @@
+apiVersion: pocketid.tobiash.github.io/v1alpha1
+kind: PocketIDOIDCClient
+metadata:
+  name: test-client
+  namespace: default
+spec:
+  instanceRef:
+    name: test
+  name: Test Application
+  callbackURLs:
+  - https://test-app.example.com/callback
+  - http://localhost:8080/callback
+  isPublic: false
+  credentialsSecretRef:
+    name: test-client-credentials

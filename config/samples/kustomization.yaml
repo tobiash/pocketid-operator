@@ -1,0 +1,7 @@
+## Append samples of your project ##
+resources:
+- pocketid_v1alpha1_pocketidinstance.yaml
+- pocketid_v1alpha1_pocketiduser.yaml
+- pocketid_v1alpha1_pocketidoidcclient.yaml
+- pocketid_v1alpha1_pocketidusergroup.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
