@@ -3,7 +3,7 @@
 set -euo pipefail
 
 MODE="${1:---reuse}"  # Default to reuse for faster iteration
-CLUSTER_NAME="pocketid-test"
+CLUSTER_NAME="${KIND_CLUSTER_NAME:-pocketid-test}"
 
 export KIND_EXPERIMENTAL_PROVIDER=podman
 
@@ -38,14 +38,14 @@ kubectl cluster-info --context "kind-${CLUSTER_NAME}"
 if [ "$FRESH_CLUSTER" = true ]; then
   echo "📦 Installing Gateway API CRDs..."
   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
-  
+
   echo "📦 Installing Envoy Gateway..."
   helm upgrade --install eg oci://docker.io/envoyproxy/gateway-helm \
     --version v1.2.0 \
     --namespace envoy-gateway-system \
     --create-namespace \
     --wait
-  
+
   echo "⏳ Waiting for Envoy Gateway to be ready..."
   kubectl wait --timeout=5m -n envoy-gateway-system deployment/envoy-gateway --for=condition=Available
 fi

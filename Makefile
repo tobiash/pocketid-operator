@@ -120,10 +120,21 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet envtest gateway-api-crds ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
-# Utilize Kind or modify the e2e tests to load the image locally, enabling compatibility with other vendors.
-test-e2e: docker-build manifests generate fmt vet
-	-KIND_CLUSTER_NAME=pocketid-e2e KIND_EXPERIMENTAL_PROVIDER=podman kind delete cluster --name pocketid-e2e
-	KIND_CLUSTER_NAME=pocketid-e2e KIND_EXPERIMENTAL_PROVIDER=podman go test ./test/e2e/ -v -timeout 20m
+# E2E tests with kind and podman
+.PHONY: test-e2e
+test-e2e: manifests generate fmt vet docker-build
+	@echo "Creating kind cluster..."
+	-KIND_CLUSTER_NAME=pocketid-test KIND_EXPERIMENTAL_PROVIDER=podman kind delete cluster --name pocketid-test 2>/dev/null || true
+	KIND_CLUSTER_NAME=pocketid-test KIND_EXPERIMENTAL_PROVIDER=podman kind create cluster --name pocketid-test --config test/harness/kind-config.yaml
+	@echo "Loading controller image into cluster..."
+	KIND_CLUSTER_NAME=pocketid-test kind load docker-image controller:latest
+	@echo "Deploying operator..."
+	cat config/default/manager_metrics_patch.yaml | sed 's|controller:latest|controller:latest|g' | kubectl apply -f -
+	kubectl apply -k config/default
+	@echo "Running e2e tests..."
+	KIND_CLUSTER_NAME=pocketid-test TEST_NAMESPACE=pocketid-e2e SKIP_KIND_CREATION=true go test ./test/e2e/... -v -timeout 20m
+	@echo "Cleaning up..."
+	-KIND_CLUSTER_NAME=pocketid-test kind delete cluster --name pocketid-test
 
 .PHONY: dev
 dev: manifests generate fmt vet ## Run the operator locally with dev-mode setup
