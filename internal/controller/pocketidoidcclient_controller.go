@@ -74,9 +74,8 @@ func (r *PocketIDOIDCClientReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if controllerutil.ContainsFinalizer(oidcClient, oidcClientFinalizer) {
 			if oidcClient.Status.ClientID != "" {
 				if err := apiClient.DeleteOIDCClient(ctx, oidcClient.Status.ClientID); err != nil {
-					// IsNotFound check would be good here, but strict error checking requires parsing
 					logger.Error(err, "Failed to delete OIDC client from API")
-					// We might want to continue even if delete fails, or retry
+					return ctrl.Result{RequeueAfter: 10 * time.Second}, err
 				}
 			}
 

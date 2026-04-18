@@ -88,6 +88,7 @@ func (r *PocketIDUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			if user.Status.UserID != "" {
 				if err := apiClient.DeleteUser(ctx, user.Status.UserID); err != nil {
 					logger.Error(err, "Failed to delete user from API")
+					return ctrl.Result{RequeueAfter: 10 * time.Second}, err
 				}
 			}
 

@@ -636,6 +636,7 @@ func (r *PocketIDInstanceReconciler) setDegradedCondition(ctx context.Context, i
 
 	if updateErr := r.Status().Update(ctx, instance); updateErr != nil {
 		logger.Error(updateErr, "Failed to update status")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, updateErr
 	}
 
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, err

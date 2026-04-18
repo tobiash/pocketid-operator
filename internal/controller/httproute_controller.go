@@ -60,22 +60,6 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// Check for enable annotation
 	if route.Annotations[AnnotationOIDCEnabled] != "true" {
-		// If annotation was removed or not "true", clean up any OIDC clients owned by this route
-		var clients pocketidv1alpha1.PocketIDOIDCClientList
-		if err := r.List(ctx, &clients, client.InNamespace(route.Namespace)); err != nil {
-			return ctrl.Result{}, err
-		}
-		for i := range clients.Items {
-			client := &clients.Items[i]
-			// Check if this route owns this client via controller reference
-			ref := metav1.GetControllerOf(client)
-			if ref != nil && ref.Kind == "HTTPRoute" && ref.Name == route.Name {
-				logger.Info("Cleaning up orphaned OIDC client due to annotation removal", "client", client.Name)
-				if err := r.Delete(ctx, client); err != nil && !apierrors.IsNotFound(err) {
-					return ctrl.Result{}, err
-				}
-			}
-		}
 		return ctrl.Result{}, nil
 	}
 
