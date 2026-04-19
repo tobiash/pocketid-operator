@@ -123,18 +123,14 @@ test: manifests generate fmt vet envtest gateway-api-crds ## Run tests.
 # E2E tests with kind and podman
 .PHONY: test-e2e
 test-e2e: manifests generate fmt vet docker-build
-	@echo "Creating kind cluster..."
-	-KIND_CLUSTER_NAME=pocketid-test KIND_EXPERIMENTAL_PROVIDER=podman kind delete cluster --name pocketid-test 2>/dev/null || true
-	KIND_CLUSTER_NAME=pocketid-test KIND_EXPERIMENTAL_PROVIDER=podman kind create cluster --name pocketid-test --config test/harness/kind-config.yaml
-	@echo "Loading controller image into cluster..."
-	KIND_CLUSTER_NAME=pocketid-test kind load docker-image controller:latest
-	@echo "Deploying operator..."
-	cat config/default/manager_metrics_patch.yaml | sed 's|controller:latest|controller:latest|g' | kubectl apply -f -
-	kubectl apply -k config/default
-	@echo "Running e2e tests..."
-	KIND_CLUSTER_NAME=pocketid-test TEST_NAMESPACE=pocketid-e2e SKIP_KIND_CREATION=true go test ./test/e2e/... -v -timeout 20m
-	@echo "Cleaning up..."
-	-KIND_CLUSTER_NAME=pocketid-test kind delete cluster --name pocketid-test
+	@echo "=== Setting up E2E test environment ==="
+	./test/harness/setup-e2e.sh
+	@echo "=== Running E2E tests ==="
+	@KUBECONFIG=$$(kind get kubeconfig-path --name pocketid-test) && \
+	KIND_CLUSTER_NAME=pocketid-test TEST_NAMESPACE=pocketid-e2e SKIP_KIND_CREATION=true \
+	go test ./test/e2e/... -v -timeout 30m
+	@echo "=== Cleaning up ==="
+	./test/harness/teardown-e2e.sh
 
 .PHONY: dev
 dev: manifests generate fmt vet ## Run the operator locally with dev-mode setup
