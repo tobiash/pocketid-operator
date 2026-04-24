@@ -212,12 +212,12 @@ func (m *MockServer) handler() http.HandlerFunc {
 		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/users/"):
 			id := strings.TrimPrefix(r.URL.Path, "/api/users/")
 			m.deleteUser(w, r, id)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/groups":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/user-groups":
 			m.listGroups(w, r)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/groups":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/user-groups":
 			m.createGroup(w, r)
-		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/groups/"):
-			id := strings.TrimPrefix(r.URL.Path, "/api/groups/")
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/user-groups/"):
+			id := strings.TrimPrefix(r.URL.Path, "/api/user-groups/")
 			m.deleteGroup(w, r, id)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/oidc/clients":
 			m.listOIDCClients(w, r)
@@ -1123,7 +1123,7 @@ var _ = Describe("PocketIDUserGroup Reconciliation", func() {
 		Expect(fetched.Status.GroupID).NotTo(BeEmpty())
 
 		calls := mockServer.CallLog()
-		Expect(calls).To(ContainElement(ContainSubstring("POST /api/groups")))
+		Expect(calls).To(ContainElement(ContainSubstring("POST /api/user-groups")))
 	})
 
 	It("should handle API errors", func() {

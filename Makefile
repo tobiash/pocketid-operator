@@ -122,12 +122,12 @@ test: manifests generate fmt vet envtest gateway-api-crds ## Run tests.
 
 # E2E tests with kind and podman
 .PHONY: test-e2e
-test-e2e: manifests generate fmt vet docker-build
+test-e2e: manifests generate fmt vet
 	@echo "=== Setting up E2E test environment ==="
 	./test/harness/setup-e2e.sh
 	@echo "=== Running E2E tests ==="
-	@KUBECONFIG=$$(kind get kubeconfig-path --name pocketid-test) && \
-	KIND_CLUSTER_NAME=pocketid-test TEST_NAMESPACE=pocketid-e2e SKIP_KIND_CREATION=true \
+	@KUBECONFIG="$(shell pwd)/bin/kind.kubeconfig" && \
+	KIND_CLUSTER_NAME=pocketid-test TEST_NAMESPACE=pocketid-e2e \
 	go test ./test/e2e/... -v -timeout 30m
 	@echo "=== Cleaning up ==="
 	./test/harness/teardown-e2e.sh
@@ -172,9 +172,10 @@ restart: stop start ## Restart the local operator process.
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
+DOCKER_BUILD_FLAGS ?=
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build -t ${IMG} .
+	$(CONTAINER_TOOL) build $(DOCKER_BUILD_FLAGS) -t ${IMG} .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.

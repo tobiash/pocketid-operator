@@ -4,11 +4,15 @@ set -euo pipefail
 
 CLUSTER_NAME="${KIND_CLUSTER_NAME:-pocketid-test}"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+CONTAINER_TOOL="${CONTAINER_TOOL:-podman}"
+
+# Add local bin to PATH
+export PATH="$PROJECT_ROOT/bin:$PATH"
 
 echo "=== E2E Test Harness Setup ==="
 
 # Check prerequisites
-for cmd in kind podman kubectl; do
+for cmd in kind kubectl "$CONTAINER_TOOL"; do
     if ! command -v "$cmd" &> /dev/null; then
         echo "ERROR: $cmd is required but not installed"
         exit 1
@@ -17,33 +21,65 @@ done
 
 echo "✓ All prerequisites found"
 
+# Ensure podman socket is running (required by kind podman provider)
+if [ "$CONTAINER_TOOL" = "podman" ]; then
+    if ! systemctl --user is-active podman.socket &>/dev/null; then
+        echo "🔌 Starting podman socket..."
+        systemctl --user start podman.socket
+    fi
+fi
+
+# Create kind cluster
+echo "🚀 Creating kind cluster..."
+if [ "$CONTAINER_TOOL" = "podman" ]; then
+    export KIND_EXPERIMENTAL_PROVIDER=podman
+fi
+
 # Check if cluster already exists
 if kind get clusters 2>/dev/null | grep -q "^${CLUSTER_NAME}$"; then
     echo "♻️ Cluster '$CLUSTER_NAME' already exists, deleting..."
-    kind delete cluster --name "$CLUSTER_NAME"
+    if [ "$CONTAINER_TOOL" = "podman" ]; then
+        systemd-run --user -p Delegate=yes --scope kind delete cluster --name "$CLUSTER_NAME" 2>/dev/null || kind delete cluster --name "$CLUSTER_NAME"
+    else
+        kind delete cluster --name "$CLUSTER_NAME"
+    fi
 fi
 
-# Create kind cluster with podman
-echo "🚀 Creating kind cluster..."
-export KIND_EXPERIMENTAL_PROVIDER=podman
-kind create cluster --name "$CLUSTER_NAME" --config "$PROJECT_ROOT/test/harness/kind-config.yaml"
+# Create cluster
+if [ "$CONTAINER_TOOL" = "podman" ]; then
+    systemd-run --user -p Delegate=yes --scope kind create cluster --name "$CLUSTER_NAME" --config "$PROJECT_ROOT/test/harness/kind-config.yaml" --wait 120s
+else
+    kind create cluster --name "$CLUSTER_NAME" --config "$PROJECT_ROOT/test/harness/kind-config.yaml" --wait 120s
+fi
 echo "✓ Cluster created"
+
+# Set up kubeconfig for kubectl commands
+KUBECONFIG_PATH="$PROJECT_ROOT/bin/kind.kubeconfig"
+kind get kubeconfig --name "$CLUSTER_NAME" > "$KUBECONFIG_PATH"
+export KUBECONFIG="$KUBECONFIG_PATH"
+echo "✓ Kubeconfig set to $KUBECONFIG_PATH"
 
 # Build operator image
 echo "🔨 Building operator image..."
 cd "$PROJECT_ROOT"
-make docker-build IMG=controller:latest
+if [ "$CONTAINER_TOOL" = "podman" ]; then
+    OPERATOR_IMG="localhost/controller:latest"
+else
+    OPERATOR_IMG="controller:latest"
+fi
+make docker-build IMG="$OPERATOR_IMG" CONTAINER_TOOL="$CONTAINER_TOOL" DOCKER_BUILD_FLAGS="--no-cache"
 echo "✓ Operator image built"
 
 # Pull PocketID image
 echo "📦 Pulling PocketID image..."
-podman pull ghcr.io/pocket-id/pocket-id:latest
+$CONTAINER_TOOL pull ghcr.io/pocket-id/pocket-id:latest
 echo "✓ PocketID image pulled"
 
-# Load images into kind
+# Load images into kind (using podman exec + ctr for podman compatibility)
 echo "📤 Loading images into kind..."
-kind load docker-image controller:latest --name "$CLUSTER_NAME"
-kind load docker-image ghcr.io/pocket-id/pocket-id:latest --name "$CLUSTER_NAME"
+NODE="${CLUSTER_NAME}-control-plane"
+$CONTAINER_TOOL save "$OPERATOR_IMG" | $CONTAINER_TOOL exec -i "$NODE" ctr -n k8s.io images import -
+$CONTAINER_TOOL save ghcr.io/pocket-id/pocket-id:latest | $CONTAINER_TOOL exec -i "$NODE" ctr -n k8s.io images import -
 echo "✓ Images loaded"
 
 # Install Gateway API CRDs
@@ -62,21 +98,22 @@ kubectl create namespace pocketid-operator-system --dry-run=client -o yaml | kub
 # Deploy operator from default kustomization
 echo "🚀 Deploying operator..."
 cd "$PROJECT_ROOT"
-kubectl kustomize config/default | kubectl apply -f -
+if [ "$CONTAINER_TOOL" = "podman" ]; then
+    kubectl kustomize config/default | sed 's|image: controller:latest|image: localhost/controller:latest|g' | kubectl apply -f -
+else
+    kubectl kustomize config/default | kubectl apply -f -
+fi
 echo "✓ Operator deployed"
 
 # Wait for operator deployment
 echo "⏳ Waiting for operator to be ready..."
-if ! kubectl wait --timeout=120s -n pocketid-operator-system deployment/controller-manager --for=condition=Available 2>/dev/null; then
-    echo "⚠️ Operator deployment not ready after 120s, showing status:"
+if ! kubectl wait --timeout=180s -n pocketid-operator-system deployment/pocketid-operator-controller-manager --for=condition=Available; then
+    echo "⚠️ Operator deployment not ready after 180s, showing status:"
     kubectl get pods -n pocketid-operator-system
     echo "Continuing anyway (pods may still be starting)..."
 fi
 echo "✓ Operator ready"
 
-# Export kubeconfig path
-KUBECONFIG_PATH="$PROJECT_ROOT/bin/kind.kubeconfig"
-kind get kubeconfig --name "$CLUSTER_NAME" > "$KUBECONFIG_PATH"
 echo ""
 echo "=== Setup Complete ==="
 echo "Cluster: kind-${CLUSTER_NAME}"

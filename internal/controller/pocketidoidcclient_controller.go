@@ -46,27 +46,20 @@ func (r *PocketIDOIDCClientReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Fetch the PocketIDInstance (may be cross-namespace)
 	instance, err := ResolveInstanceReference(ctx, r.Client, oidcClient.Spec.InstanceRef, oidcClient.Namespace)
 	if err != nil {
-		logger.Error(err, "Failed to get PocketIDInstance")
-		return ctrl.Result{}, err
+		return r.updateErrorStatus(ctx, oidcClient, "InstanceNotFound", err)
 	}
 
-	// Validate cross-namespace reference
 	allowed, reason, err := ValidateCrossNamespaceReference(ctx, r.Client, instance, oidcClient.Namespace)
 	if err != nil {
-		logger.Error(err, "Failed to validate cross-namespace reference")
-		return ctrl.Result{}, err
+		return r.updateErrorStatus(ctx, oidcClient, "CrossNamespaceValidationFailed", err)
 	}
 	if !allowed {
-		logger.Info("Cross-namespace reference denied", "reason", reason)
-		// TODO: Set condition on status
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return r.updateErrorStatus(ctx, oidcClient, "CrossNamespaceDenied", fmt.Errorf("cross-namespace reference denied: %s", reason))
 	}
 
-	// Helper to create API client
 	apiClient, err := r.getAPIClient(ctx, instance)
 	if err != nil {
-		logger.Error(err, "Failed to create API client")
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		return r.updateErrorStatus(ctx, oidcClient, "APIClientCreationFailed", err)
 	}
 
 	// Handle deletion
@@ -102,16 +95,13 @@ func (r *PocketIDOIDCClientReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if oidcClient.Status.ClientID != "" {
 		pocketIDClient, err = apiClient.GetOIDCClient(ctx, oidcClient.Status.ClientID)
 		if err != nil {
-			logger.Error(err, "Failed to get OIDC client from API")
-			// If 404, we should clear ID and recreate
-			// For now, assume error and requeue
-			return ctrl.Result{}, err
+			return r.updateErrorStatus(ctx, oidcClient, "GetOIDCClientFailed", err)
 		}
 	} else {
 		// Try to find by name (requires listing all clients)
 		clients, err := apiClient.ListOIDCClients(ctx)
 		if err != nil {
-			return ctrl.Result{}, err
+			return r.updateErrorStatus(ctx, oidcClient, "ListOIDCClientsFailed", err)
 		}
 		for _, c := range clients {
 			if c.Name == oidcClient.Spec.Name {
@@ -124,18 +114,17 @@ func (r *PocketIDOIDCClientReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Create or Update
 	targetClient := &pocketid.OIDCClient{
 		Name:         oidcClient.Spec.Name,
-		ClientID:     oidcClient.Spec.ClientID,
+		ID:           oidcClient.Spec.ClientID,
 		IsPublic:     oidcClient.Spec.IsPublic,
-		RedirectURIs: oidcClient.Spec.CallbackURLs,
+		CallbackURLs: oidcClient.Spec.CallbackURLs,
 	}
-	// TODO: Handle LogoutCallbackURLs if supported by API type (I put RedirectURIs in type, not logout)
 
 	if pocketIDClient == nil {
 		// Create
 		logger.Info("Creating OIDC Client", "name", targetClient.Name)
 		created, err := apiClient.CreateOIDCClient(ctx, targetClient)
 		if err != nil {
-			return ctrl.Result{}, err
+			return r.updateErrorStatus(ctx, oidcClient, "CreateOIDCClientFailed", err)
 		}
 		pocketIDClient = created
 		// Store the internal DB ID (used for updates, secrets)
@@ -145,11 +134,11 @@ func (r *PocketIDOIDCClientReconciler) Reconcile(ctx context.Context, req ctrl.R
 		// Update
 		// Basic check if update needed (could be optimized)
 		targetClient.ID = pocketIDClient.ID
-		if pocketIDClient.Name != targetClient.Name || !equalStrings(pocketIDClient.RedirectURIs, targetClient.RedirectURIs) {
+		if pocketIDClient.Name != targetClient.Name || !equalStrings(pocketIDClient.CallbackURLs, targetClient.CallbackURLs) {
 			logger.Info("Updating OIDC Client", "id", pocketIDClient.ID)
 			updated, err := apiClient.UpdateOIDCClient(ctx, pocketIDClient.ID, targetClient)
 			if err != nil {
-				return ctrl.Result{}, err
+				return r.updateErrorStatus(ctx, oidcClient, "UpdateOIDCClientFailed", err)
 			}
 			pocketIDClient = updated
 		}
@@ -226,6 +215,27 @@ func (r *PocketIDOIDCClientReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+}
+
+func (r *PocketIDOIDCClientReconciler) updateErrorStatus(ctx context.Context, oidcClient *pocketidv1alpha1.PocketIDOIDCClient, reason string, reconcileErr error) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	logger.Error(reconcileErr, "Reconciliation failed", "reason", reason)
+
+	oidcClient.Status.Ready = false
+	oidcClient.Status.Synced = false
+	meta.SetStatusCondition(&oidcClient.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            reconcileErr.Error(),
+		ObservedGeneration: oidcClient.Generation,
+	})
+
+	if updateErr := r.Status().Update(ctx, oidcClient); updateErr != nil {
+		logger.Error(updateErr, "Failed to update error status")
+	}
+
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, reconcileErr
 }
 
 func (r *PocketIDOIDCClientReconciler) getAPIClient(ctx context.Context, instance *pocketidv1alpha1.PocketIDInstance) (*pocketid.Client, error) {

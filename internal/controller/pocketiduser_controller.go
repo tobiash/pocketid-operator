@@ -18,9 +18,11 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -60,26 +62,20 @@ func (r *PocketIDUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Fetch the PocketIDInstance (may be cross-namespace)
 	instance, err := ResolveInstanceReference(ctx, r.Client, user.Spec.InstanceRef, user.Namespace)
 	if err != nil {
-		logger.Error(err, "Failed to get PocketIDInstance")
-		return ctrl.Result{}, err
+		return r.updateErrorStatus(ctx, user, "InstanceNotFound", err)
 	}
 
-	// Validate cross-namespace reference
 	allowed, reason, err := ValidateCrossNamespaceReference(ctx, r.Client, instance, user.Namespace)
 	if err != nil {
-		logger.Error(err, "Failed to validate cross-namespace reference")
-		return ctrl.Result{}, err
+		return r.updateErrorStatus(ctx, user, "CrossNamespaceValidationFailed", err)
 	}
 	if !allowed {
-		logger.Info("Cross-namespace reference denied", "reason", reason)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return r.updateErrorStatus(ctx, user, "CrossNamespaceDenied", fmt.Errorf("cross-namespace reference denied: %s", reason))
 	}
 
-	// Helper to create API client
 	apiClient, err := r.getAPIClient(ctx, instance)
 	if err != nil {
-		logger.Error(err, "Failed to create API client")
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		return r.updateErrorStatus(ctx, user, "APIClientCreationFailed", err)
 	}
 
 	// Handle deletion
@@ -115,14 +111,13 @@ func (r *PocketIDUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if user.Status.UserID != "" {
 		pocketIDUser, err = apiClient.GetUser(ctx, user.Status.UserID)
 		if err != nil {
-			logger.Error(err, "Failed to get user from API")
-			return ctrl.Result{}, err
+			return r.updateErrorStatus(ctx, user, "GetUserFailed", err)
 		}
 	} else {
 		// Try to find by username
 		users, err := apiClient.ListUsers(ctx)
 		if err != nil {
-			return ctrl.Result{}, err
+			return r.updateErrorStatus(ctx, user, "ListUsersFailed", err)
 		}
 		for _, u := range users {
 			if u.Username == user.Spec.Username {
@@ -136,15 +131,17 @@ func (r *PocketIDUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	targetUser := &pocketid.User{
 		Username:    user.Spec.Username,
 		FirstName:   user.Spec.FirstName,
-		LastName:    user.Spec.LastName,
 		DisplayName: user.Spec.DisplayName,
 		IsAdmin:     user.Spec.IsAdmin,
 		Disabled:    user.Spec.Disabled,
-		Locale:      user.Spec.Locale,
+		Email:       user.Spec.Email,
 	}
 
-	if user.Spec.Email != nil {
-		targetUser.Email = *user.Spec.Email
+	if user.Spec.LastName != "" {
+		targetUser.LastName = &user.Spec.LastName
+	}
+	if user.Spec.Locale != "" {
+		targetUser.Locale = &user.Spec.Locale
 	}
 
 	if pocketIDUser == nil {
@@ -152,7 +149,7 @@ func (r *PocketIDUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		logger.Info("Creating user", "username", targetUser.Username)
 		created, err := apiClient.CreateUser(ctx, targetUser)
 		if err != nil {
-			return ctrl.Result{}, err
+			return r.updateErrorStatus(ctx, user, "CreateUserFailed", err)
 		}
 		pocketIDUser = created
 		user.Status.UserID = created.ID
@@ -163,7 +160,7 @@ func (r *PocketIDUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			logger.Info("Updating user", "id", pocketIDUser.ID)
 			updated, err := apiClient.UpdateUser(ctx, pocketIDUser.ID, targetUser)
 			if err != nil {
-				return ctrl.Result{}, err
+				return r.updateErrorStatus(ctx, user, "UpdateUserFailed", err)
 			}
 			pocketIDUser = updated
 		}
@@ -171,25 +168,23 @@ func (r *PocketIDUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Sync group memberships
 	if err := r.syncGroupMemberships(ctx, apiClient, user, pocketIDUser); err != nil {
-		logger.Error(err, "Failed to sync group memberships")
-		return ctrl.Result{}, err
+		return r.updateErrorStatus(ctx, user, "GroupSyncFailed", err)
 	}
 
 	// Handle onboarding email
 	if user.Spec.SendOnboardingEmail && !user.Status.OnboardingEmailSent {
-		logger.Info("Sending onboarding email", "userId", pocketIDUser.ID)
-		resp, err := apiClient.SendOnboardingEmail(ctx, pocketIDUser.ID)
+		logger.Info("Creating one-time access token", "userId", pocketIDUser.ID)
+		resp, err := apiClient.CreateOneTimeAccessToken(ctx, pocketIDUser.ID)
 		if err != nil {
-			logger.Error(err, "Failed to send onboarding email")
-			// Don't fail reconciliation, just log
+			logger.Error(err, "Failed to create one-time access token")
 		} else {
 			now := metav1.Now()
 			user.Status.OnboardingEmailSent = true
 			user.Status.OnboardingEmailSentAt = &now
 
-			// Store one-time access link in secret if requested
 			if user.Spec.OneTimeAccessSecretRef != nil && resp != nil {
-				if err := r.storeOneTimeAccessLink(ctx, user, resp.OneTimeAccessLink); err != nil {
+				link := fmt.Sprintf("%s/login/%s", instance.Spec.AppURL, resp.Token)
+				if err := r.storeOneTimeAccessLink(ctx, user, link); err != nil {
 					logger.Error(err, "Failed to store one-time access link")
 				}
 			}
@@ -203,6 +198,14 @@ func (r *PocketIDUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	user.Status.LastSyncTime = &now
 	user.Status.ObservedGeneration = user.Generation
 
+	meta.SetStatusCondition(&user.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionTrue,
+		Reason:             "Synced",
+		Message:            "User synced successfully",
+		ObservedGeneration: user.Generation,
+	})
+
 	if err := r.Status().Update(ctx, user); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -210,18 +213,39 @@ func (r *PocketIDUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 
+func (r *PocketIDUserReconciler) updateErrorStatus(ctx context.Context, user *pocketidv1alpha1.PocketIDUser, reason string, reconcileErr error) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	logger.Error(reconcileErr, "Reconciliation failed", "reason", reason)
+
+	user.Status.Ready = false
+	user.Status.Synced = false
+	meta.SetStatusCondition(&user.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            reconcileErr.Error(),
+		ObservedGeneration: user.Generation,
+	})
+
+	if updateErr := r.Status().Update(ctx, user); updateErr != nil {
+		logger.Error(updateErr, "Failed to update error status")
+	}
+
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, reconcileErr
+}
+
 // needsUserUpdate checks if the user needs to be updated
 func needsUserUpdate(current, target *pocketid.User) bool {
 	if current.Username != target.Username {
 		return true
 	}
-	if current.Email != target.Email {
+	if !stringPtrEqual(current.Email, target.Email) {
 		return true
 	}
 	if current.FirstName != target.FirstName {
 		return true
 	}
-	if current.LastName != target.LastName {
+	if !stringPtrEqual(current.LastName, target.LastName) {
 		return true
 	}
 	if current.DisplayName != target.DisplayName {
@@ -233,20 +257,28 @@ func needsUserUpdate(current, target *pocketid.User) bool {
 	if current.Disabled != target.Disabled {
 		return true
 	}
-	if current.Locale != target.Locale {
+	if !stringPtrEqual(current.Locale, target.Locale) {
 		return true
 	}
 	return false
+}
+
+func stringPtrEqual(a, b *string) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
 }
 
 // syncGroupMemberships synchronizes user group memberships
 func (r *PocketIDUserReconciler) syncGroupMemberships(ctx context.Context, apiClient *pocketid.Client, user *pocketidv1alpha1.PocketIDUser, pocketIDUser *pocketid.User) error {
 	logger := log.FromContext(ctx)
 
-	// Get desired group IDs from UserGroupRefs
 	desiredGroupIDs := make(map[string]bool)
 	for _, groupRef := range user.Spec.UserGroupRefs {
-		// Fetch the UserGroup CR
 		group := &pocketidv1alpha1.PocketIDUserGroup{}
 		if err := r.Get(ctx, types.NamespacedName{Name: groupRef.Name, Namespace: user.Namespace}, group); err != nil {
 			logger.Error(err, "Failed to get UserGroup", "name", groupRef.Name)
@@ -257,31 +289,35 @@ func (r *PocketIDUserReconciler) syncGroupMemberships(ctx context.Context, apiCl
 		}
 	}
 
-	// Get current group memberships
 	currentGroupIDs := make(map[string]bool)
-	if pocketIDUser.GroupIDs != nil {
-		for _, gid := range pocketIDUser.GroupIDs {
-			currentGroupIDs[gid] = true
-		}
+	for _, ug := range pocketIDUser.UserGroups {
+		currentGroupIDs[ug.ID] = true
 	}
 
-	// Add user to groups they should be in
+	needsUpdate := false
 	for gid := range desiredGroupIDs {
 		if !currentGroupIDs[gid] {
-			logger.Info("Adding user to group", "userId", pocketIDUser.ID, "groupId", gid)
-			if err := apiClient.AddUserToGroup(ctx, gid, pocketIDUser.ID); err != nil {
-				logger.Error(err, "Failed to add user to group", "groupId", gid)
+			needsUpdate = true
+			break
+		}
+	}
+	if !needsUpdate {
+		for gid := range currentGroupIDs {
+			if !desiredGroupIDs[gid] {
+				needsUpdate = true
+				break
 			}
 		}
 	}
 
-	// Remove user from groups they shouldn't be in
-	for gid := range currentGroupIDs {
-		if !desiredGroupIDs[gid] {
-			logger.Info("Removing user from group", "userId", pocketIDUser.ID, "groupId", gid)
-			if err := apiClient.RemoveUserFromGroup(ctx, gid, pocketIDUser.ID); err != nil {
-				logger.Error(err, "Failed to remove user from group", "groupId", gid)
-			}
+	if needsUpdate {
+		var groupIDs []string
+		for gid := range desiredGroupIDs {
+			groupIDs = append(groupIDs, gid)
+		}
+		logger.Info("Updating user group memberships", "userId", pocketIDUser.ID, "groups", groupIDs)
+		if err := apiClient.SetUserGroups(ctx, pocketIDUser.ID, groupIDs); err != nil {
+			return err
 		}
 	}
 

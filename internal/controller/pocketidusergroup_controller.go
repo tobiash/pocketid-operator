@@ -18,8 +18,10 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -56,26 +58,22 @@ func (r *PocketIDUserGroupReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// Fetch the PocketIDInstance (may be cross-namespace)
 	instance, err := ResolveInstanceReference(ctx, r.Client, group.Spec.InstanceRef, group.Namespace)
 	if err != nil {
-		logger.Error(err, "Failed to get PocketIDInstance")
-		return ctrl.Result{}, err
+		return r.updateErrorStatus(ctx, group, "InstanceNotFound", err)
 	}
 
 	// Validate cross-namespace reference
 	allowed, reason, err := ValidateCrossNamespaceReference(ctx, r.Client, instance, group.Namespace)
 	if err != nil {
-		logger.Error(err, "Failed to validate cross-namespace reference")
-		return ctrl.Result{}, err
+		return r.updateErrorStatus(ctx, group, "CrossNamespaceValidationFailed", err)
 	}
 	if !allowed {
-		logger.Info("Cross-namespace reference denied", "reason", reason)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return r.updateErrorStatus(ctx, group, "CrossNamespaceDenied", fmt.Errorf("cross-namespace reference denied: %s", reason))
 	}
 
 	// Helper to create API client
 	apiClient, err := r.getAPIClient(ctx, instance)
 	if err != nil {
-		logger.Error(err, "Failed to create API client")
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		return r.updateErrorStatus(ctx, group, "APIClientCreationFailed", err)
 	}
 
 	// Handle deletion
@@ -111,14 +109,13 @@ func (r *PocketIDUserGroupReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if group.Status.GroupID != "" {
 		pocketIDGroup, err = apiClient.GetGroup(ctx, group.Status.GroupID)
 		if err != nil {
-			logger.Error(err, "Failed to get group from API")
-			return ctrl.Result{}, err
+			return r.updateErrorStatus(ctx, group, "GetGroupFailed", err)
 		}
 	} else {
 		// Try to find by name
 		groups, err := apiClient.ListGroups(ctx)
 		if err != nil {
-			return ctrl.Result{}, err
+			return r.updateErrorStatus(ctx, group, "ListGroupFailed", err)
 		}
 		for _, g := range groups {
 			if g.Name == group.Spec.Name {
@@ -129,51 +126,53 @@ func (r *PocketIDUserGroupReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	// Build target group
-	targetGroup := &pocketid.UserGroup{
+	targetGroup := &pocketid.UserGroupCreate{
 		Name:         group.Spec.Name,
 		FriendlyName: group.Spec.FriendlyName,
-		IsDefault:    group.Spec.IsDefault,
-	}
-
-	// Convert custom claims
-	if len(group.Spec.CustomClaims) > 0 {
-		targetGroup.CustomClaims = make([]pocketid.CustomClaim, len(group.Spec.CustomClaims))
-		for i, claim := range group.Spec.CustomClaims {
-			targetGroup.CustomClaims[i] = pocketid.CustomClaim{
-				Key:   claim.Key,
-				Value: claim.Value,
-			}
-		}
 	}
 
 	if pocketIDGroup == nil {
-		// Create
 		logger.Info("Creating user group", "name", targetGroup.Name)
 		created, err := apiClient.CreateGroup(ctx, targetGroup)
 		if err != nil {
-			return ctrl.Result{}, err
+			return r.updateErrorStatus(ctx, group, "CreateGroupFailed", err)
 		}
 		pocketIDGroup = created
 		group.Status.GroupID = created.ID
 	} else {
-		// Update if needed
-		targetGroup.ID = pocketIDGroup.ID
-		if needsGroupUpdate(pocketIDGroup, targetGroup) {
+		targetGroupUpdated := &pocketid.UserGroupCreate{
+			Name:         group.Spec.Name,
+			FriendlyName: group.Spec.FriendlyName,
+		}
+		if needsGroupUpdate(pocketIDGroup, targetGroupUpdated) {
 			logger.Info("Updating user group", "id", pocketIDGroup.ID)
-			updated, err := apiClient.UpdateGroup(ctx, pocketIDGroup.ID, targetGroup)
+			updated, err := apiClient.UpdateGroup(ctx, pocketIDGroup.ID, targetGroupUpdated)
 			if err != nil {
-				return ctrl.Result{}, err
+				return r.updateErrorStatus(ctx, group, "UpdateGroupFailed", err)
 			}
 			pocketIDGroup = updated
 		}
 	}
 
 	// Update status
+	groupID := pocketIDGroup.ID
+	if err := r.Get(ctx, client.ObjectKeyFromObject(group), group); err != nil {
+		return ctrl.Result{}, err
+	}
 	now := metav1.Now()
+	group.Status.GroupID = groupID
 	group.Status.Ready = true
 	group.Status.Synced = true
 	group.Status.LastSyncTime = &now
 	group.Status.ObservedGeneration = group.Generation
+
+	meta.SetStatusCondition(&group.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionTrue,
+		Reason:             "Synced",
+		Message:            "User group synced successfully",
+		ObservedGeneration: group.Generation,
+	})
 
 	if err := r.Status().Update(ctx, group); err != nil {
 		return ctrl.Result{}, err
@@ -182,26 +181,34 @@ func (r *PocketIDUserGroupReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 
+func (r *PocketIDUserGroupReconciler) updateErrorStatus(ctx context.Context, group *pocketidv1alpha1.PocketIDUserGroup, reason string, reconcileErr error) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	logger.Error(reconcileErr, "Reconciliation failed", "reason", reason)
+
+	group.Status.Ready = false
+	group.Status.Synced = false
+	meta.SetStatusCondition(&group.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            reconcileErr.Error(),
+		ObservedGeneration: group.Generation,
+	})
+
+	if updateErr := r.Status().Update(ctx, group); updateErr != nil {
+		logger.Error(updateErr, "Failed to update error status")
+	}
+
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, reconcileErr
+}
+
 // needsGroupUpdate checks if the group needs to be updated
-func needsGroupUpdate(current, target *pocketid.UserGroup) bool {
+func needsGroupUpdate(current *pocketid.UserGroup, target *pocketid.UserGroupCreate) bool {
 	if current.Name != target.Name {
 		return true
 	}
 	if current.FriendlyName != target.FriendlyName {
 		return true
-	}
-	if current.IsDefault != target.IsDefault {
-		return true
-	}
-	// Compare custom claims
-	if len(current.CustomClaims) != len(target.CustomClaims) {
-		return true
-	}
-	for i := range current.CustomClaims {
-		if current.CustomClaims[i].Key != target.CustomClaims[i].Key ||
-			current.CustomClaims[i].Value != target.CustomClaims[i].Value {
-			return true
-		}
 	}
 	return false
 }

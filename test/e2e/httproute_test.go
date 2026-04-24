@@ -48,7 +48,7 @@ func TestHTTPRoute(t *testing.T) {
 			ns := testNamespace
 			client := &pocketidv1alpha1.PocketIDOIDCClient{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-route-client",
+					Name:      "test-route-oidc",
 					Namespace: ns,
 				},
 			}
@@ -90,7 +90,7 @@ func TestHTTPRoute(t *testing.T) {
 			time.Sleep(30 * time.Second)
 
 			client := &pocketidv1alpha1.PocketIDOIDCClient{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-route-client", Namespace: ns},
+				ObjectMeta: metav1.ObjectMeta{Name: "test-route-oidc", Namespace: ns},
 			}
 			err := cfg.Client().Resources().Get(ctx, client.Name, ns, client)
 			if err == nil {
