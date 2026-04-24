@@ -1,9 +1,12 @@
-apiVersion: pocketid.pocketid.tobiash.github.io/v1alpha1
+apiVersion: pocketid.tobiash.github.io/v1alpha1
 kind: PocketIDUser
 metadata:
-  labels:
-    app.kubernetes.io/name: pocketid-operator
-    app.kubernetes.io/managed-by: kustomize
-  name: pocketiduser-sample
+  name: sample-user
 spec:
-  # TODO(user): Add fields here
+  instanceRef:
+    name: test
+  username: jdoe
+  email: jdoe@example.com
+  firstName: John
+  lastName: Doe
+  displayName: John Doe

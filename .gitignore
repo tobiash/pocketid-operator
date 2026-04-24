@@ -10,11 +10,12 @@ Dockerfile.cross
 # Test binary, built with `go test -c`
 *.test
 
-# Output of the go coverage tool, specifically when used with LiteIDE
+# Output of the go coverage tool
 *.out
 
 # Go workspace file
 go.work
+go.work.sum
 
 # Kubernetes Generated files - skip generated files, except for vendored files
 !vendor/**/zz_generated.*
@@ -25,3 +26,13 @@ go.work
 *.swp
 *.swo
 *~
+
+# operator runtime artifacts
+operator.log
+operator.pid
+port-forward.log
+port-forward.pid
+dev.log
+
+# dist output
+dist/

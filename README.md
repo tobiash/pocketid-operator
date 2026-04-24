@@ -1,114 +1,159 @@
-# pocketid-operator
-// TODO(user): Add simple overview of use/purpose
+# PocketID Operator
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+A Kubernetes operator that manages [PocketID](https://github.com/pocket-id/pocket-id) identity provider resources using custom resource definitions.
 
-## Getting Started
+## Overview
 
-### Prerequisites
-- go version v1.22.0+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+The operator automates lifecycle management of PocketID resources:
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+- **PocketIDInstance** — Deploys and configures a PocketID StatefulSet with secrets, config, service, and optional admin initialization
+- **PocketIDOIDCClient** — Manages OIDC clients and stores credentials in Kubernetes secrets
+- **PocketIDUser** — Manages users with group membership sync and onboarding token support
+- **PocketIDUserGroup** — Manages user groups
+- **HTTPRoute integration** — Automatically creates OIDC clients for HTTPRoutes annotated with `pocket-id.io/oidc-enabled`
 
-```sh
-make docker-build docker-push IMG=<some-registry>/pocketid-operator:tag
-```
+Compatible with **PocketID v2**.
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+## Prerequisites
 
-**Install the CRDs into the cluster:**
+- Go 1.26+
+- Docker or Podman
+- kubectl
+- Access to a Kubernetes 1.29+ cluster
+
+## Quick Start
+
+### Install CRDs
 
 ```sh
 make install
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+### Build and Deploy
 
 ```sh
-make deploy IMG=<some-registry>/pocketid-operator:tag
+make docker-build docker-push IMG=<your-registry>/pocketid-operator:latest
+make deploy IMG=<your-registry>/pocketid-operator:latest
 ```
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
+### Create a PocketID Instance
 
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
+```yaml
+apiVersion: pocketid.tobiash.github.io/v1alpha1
+kind: PocketIDInstance
+metadata:
+  name: my-instance
+spec:
+  appUrl: "https://auth.example.com"
+  image: "ghcr.io/pocket-id/pocket-id:latest"
+  replicas: 1
+  trustProxy: true
+  sessionDuration: 60
+  database:
+    provider: sqlite
+  storage:
+    pvc:
+      size: "1Gi"
+```
+
+### Create an OIDC Client
+
+```yaml
+apiVersion: pocketid.tobiash.github.io/v1alpha1
+kind: PocketIDOIDCClient
+metadata:
+  name: my-app
+spec:
+  instanceRef:
+    name: my-instance
+  name: My Application
+  callbackURLs:
+    - https://myapp.example.com/callback
+  credentialsSecretRef:
+    name: my-app-oidc-credentials
+```
+
+The operator creates the OIDC client in PocketID and stores `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, and `OIDC_ISSUER_URL` in the referenced secret.
+
+### Create Users and Groups
+
+```yaml
+apiVersion: pocketid.tobiash.github.io/v1alpha1
+kind: PocketIDUserGroup
+metadata:
+  name: developers
+spec:
+  instanceRef:
+    name: my-instance
+  name: developers
+  friendlyName: Development Team
+---
+apiVersion: pocketid.tobiash.github.io/v1alpha1
+kind: PocketIDUser
+metadata:
+  name: jdoe
+spec:
+  instanceRef:
+    name: my-instance
+  username: jdoe
+  email: jdoe@example.com
+  firstName: John
+  lastName: Doe
+  displayName: John Doe
+  userGroupRefs:
+    - name: developers
+```
+
+### HTTPRoute OIDC Integration
+
+Annotate an HTTPRoute to automatically create an OIDC client:
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: my-app
+  annotations:
+    pocket-id.io/oidc-enabled: "true"
+    pocket-id.io/instance: "my-instance"
+spec:
+  hostnames:
+    - myapp.example.com
+```
+
+The operator creates an OIDC client named `<route-name>-oidc`.
+
+## Development
+
+### Run Tests
 
 ```sh
-kubectl apply -k config/samples/
+# Unit + integration tests
+make test
+
+# End-to-end tests (requires podman or docker)
+CONTAINER_TOOL=podman make test-e2e
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
-
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
+### Run Locally
 
 ```sh
-kubectl delete -k config/samples/
+make dev
 ```
 
-**Delete the APIs(CRDs) from the cluster:**
+### Make Targets
 
-```sh
-make uninstall
-```
+Run `make help` for the full list.
 
-**UnDeploy the controller from the cluster:**
+## Architecture
 
-```sh
-make undeploy
-```
+All controllers follow a consistent pattern:
 
-## Project Distribution
-
-Following are the steps to build the installer and distribute this project to users.
-
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/pocketid-operator:tag
-```
-
-NOTE: The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without
-its dependencies.
-
-2. Using the installer
-
-Users can just run kubectl apply -f <URL for YAML BUNDLE> to install the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/pocketid-operator/<tag or branch>/dist/install.yaml
-```
-
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
+- **Finalizers** prevent deletion before cleanup in PocketID
+- **Status conditions** are set on all paths (success, error, deletion) with machine-readable reasons
+- **Re-fetch before status update** avoids conflict errors
+- **Cross-namespace references** are validated against the instance's allowed namespaces
 
 ## License
 
-Copyright 2026.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+Apache License 2.0

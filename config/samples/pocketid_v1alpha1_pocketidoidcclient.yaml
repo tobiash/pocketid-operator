@@ -1,9 +1,14 @@
-apiVersion: pocketid.pocketid.tobiash.github.io/v1alpha1
+apiVersion: pocketid.tobiash.github.io/v1alpha1
 kind: PocketIDOIDCClient
 metadata:
-  labels:
-    app.kubernetes.io/name: pocketid-operator
-    app.kubernetes.io/managed-by: kustomize
-  name: pocketidoidcclient-sample
+  name: sample-oidc-client
 spec:
-  # TODO(user): Add fields here
+  instanceRef:
+    name: test
+  name: My Web App
+  callbackURLs:
+    - https://myapp.example.com/callback
+  logoutCallbackURLs:
+    - https://myapp.example.com/logout
+  credentialsSecretRef:
+    name: my-app-oidc-credentials
