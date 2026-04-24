@@ -81,8 +81,7 @@ func (r *PocketIDUserGroupReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		if controllerutil.ContainsFinalizer(group, groupFinalizer) {
 			if group.Status.GroupID != "" {
 				if err := apiClient.DeleteGroup(ctx, group.Status.GroupID); err != nil {
-					logger.Error(err, "Failed to delete group from API")
-					return ctrl.Result{RequeueAfter: 10 * time.Second}, err
+					return r.updateErrorStatus(ctx, group, "DeleteGroupFailed", err)
 				}
 			}
 

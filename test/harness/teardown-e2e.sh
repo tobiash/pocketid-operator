@@ -1,10 +1,16 @@
 #!/bin/bash
-# Tears down kind cluster used for e2e tests
 set -euo pipefail
 
 CLUSTER_NAME="${KIND_CLUSTER_NAME:-pocketid-test}"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+CONTAINER_TOOL="${CONTAINER_TOOL:-podman}"
 
-echo "🧹 Deleting kind cluster: $CLUSTER_NAME"
-export KIND_EXPERIMENTAL_PROVIDER=podman
+export PATH="$PROJECT_ROOT/bin:$PATH"
+
+if [ "$CONTAINER_TOOL" = "podman" ]; then
+    export KIND_EXPERIMENTAL_PROVIDER=podman
+fi
+
+echo "Deleting kind cluster: $CLUSTER_NAME"
 kind delete cluster --name "$CLUSTER_NAME"
-echo "✓ Cluster deleted"
+echo "Cluster deleted"

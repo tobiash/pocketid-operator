@@ -83,8 +83,7 @@ func (r *PocketIDUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if controllerutil.ContainsFinalizer(user, userFinalizer) {
 			if user.Status.UserID != "" {
 				if err := apiClient.DeleteUser(ctx, user.Status.UserID); err != nil {
-					logger.Error(err, "Failed to delete user from API")
-					return ctrl.Result{RequeueAfter: 10 * time.Second}, err
+					return r.updateErrorStatus(ctx, user, "DeleteUserFailed", err)
 				}
 			}
 
@@ -192,7 +191,12 @@ func (r *PocketIDUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Update status
+	userID := pocketIDUser.ID
+	if err := r.Get(ctx, client.ObjectKeyFromObject(user), user); err != nil {
+		return ctrl.Result{}, err
+	}
 	now := metav1.Now()
+	user.Status.UserID = userID
 	user.Status.Ready = true
 	user.Status.Synced = true
 	user.Status.LastSyncTime = &now

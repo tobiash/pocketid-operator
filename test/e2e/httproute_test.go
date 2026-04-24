@@ -89,14 +89,21 @@ func TestHTTPRoute(t *testing.T) {
 
 			time.Sleep(30 * time.Second)
 
-			client := &pocketidv1alpha1.PocketIDOIDCClient{
+			oidcClient := &pocketidv1alpha1.PocketIDOIDCClient{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-route-oidc", Namespace: ns},
 			}
-			err := cfg.Client().Resources().Get(ctx, client.Name, ns, client)
+			err := cfg.Client().Resources().Get(ctx, oidcClient.Name, ns, oidcClient)
 			if err == nil {
-				t.Logf("WARNING: OIDC client still exists, may need explicit deletion or owner reference not set")
+				t.Logf("OIDC client still exists, cleaning up explicitly")
+				if err := cfg.Client().Resources().Delete(ctx, oidcClient); err != nil {
+					t.Logf("WARNING: failed to delete orphaned OIDC client: %v", err)
+				}
 			} else {
 				t.Logf("OIDC client was cleaned up")
+			}
+
+			if err := cfg.Client().Resources().Delete(ctx, route); err != nil {
+				t.Logf("WARNING: failed to delete HTTPRoute: %v", err)
 			}
 
 			return ctx

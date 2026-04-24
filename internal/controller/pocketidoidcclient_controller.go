@@ -67,8 +67,7 @@ func (r *PocketIDOIDCClientReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if controllerutil.ContainsFinalizer(oidcClient, oidcClientFinalizer) {
 			if oidcClient.Status.ClientID != "" {
 				if err := apiClient.DeleteOIDCClient(ctx, oidcClient.Status.ClientID); err != nil {
-					logger.Error(err, "Failed to delete OIDC client from API")
-					return ctrl.Result{RequeueAfter: 10 * time.Second}, err
+					return r.updateErrorStatus(ctx, oidcClient, "DeleteOIDCClientFailed", err)
 				}
 			}
 
@@ -196,7 +195,14 @@ func (r *PocketIDOIDCClientReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 
-	// Update Status - ClientID was already set during create/update
+	// Update Status - re-fetch to avoid conflict
+	clientID := pocketIDClient.ID
+	credentialsSecretName := oidcClient.Status.CredentialsSecretName
+	if err := r.Get(ctx, client.ObjectKeyFromObject(oidcClient), oidcClient); err != nil {
+		return ctrl.Result{}, err
+	}
+	oidcClient.Status.ClientID = clientID
+	oidcClient.Status.CredentialsSecretName = credentialsSecretName
 	oidcClient.Status.Ready = true
 	oidcClient.Status.Synced = true
 	now := metav1.Now()

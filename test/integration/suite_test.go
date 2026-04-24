@@ -19,6 +19,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -26,7 +27,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
-	metrics "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	pocketidv1alpha1 "github.com/tobiash/pocketid-operator/api/v1alpha1"
@@ -552,13 +552,11 @@ func writeError(w http.ResponseWriter, err error) {
 }
 
 var (
-	testEnv       *envtest.Environment
-	k8sClient     client.Client
-	mockServer    *MockServer
-	ctx           context.Context
-	cancel        context.CancelFunc
-	controllerMgr ctrl.Manager
-	testClient    client.Client // Client used by controllers in tests
+	testEnv    *envtest.Environment
+	k8sClient  client.Client
+	mockServer *MockServer
+	ctx        context.Context
+	cancel     context.CancelFunc
 )
 
 func TestIntegration(t *testing.T) {
@@ -598,47 +596,6 @@ var _ = BeforeSuite(func() {
 	mockServer = NewMockServer()
 	os.Setenv("KUBERNETES_SERVICE_HOST", "")
 	os.Setenv("POCKETID_DEV_API_URL", mockServer.URL)
-
-	By("Setting up controller manager")
-	controllerMgr, err = ctrl.NewManager(cfg, ctrl.Options{
-		Scheme:                 scheme.Scheme,
-		Metrics:                metrics.Options{BindAddress: "0"},
-		HealthProbeBindAddress: "0",
-		LeaderElection:         false,
-	})
-	Expect(err).NotTo(HaveOccurred())
-
-	err = (&controller.PocketIDOIDCClientReconciler{
-		Client: controllerMgr.GetClient(),
-		Scheme: controllerMgr.GetScheme(),
-	}).SetupWithManager(controllerMgr)
-	Expect(err).NotTo(HaveOccurred())
-
-	testClient = controllerMgr.GetClient()
-
-	err = (&controller.PocketIDUserReconciler{
-		Client: controllerMgr.GetClient(),
-		Scheme: controllerMgr.GetScheme(),
-	}).SetupWithManager(controllerMgr)
-	Expect(err).NotTo(HaveOccurred())
-
-	err = (&controller.PocketIDUserGroupReconciler{
-		Client: controllerMgr.GetClient(),
-		Scheme: controllerMgr.GetScheme(),
-	}).SetupWithManager(controllerMgr)
-	Expect(err).NotTo(HaveOccurred())
-
-	err = (&controller.PocketIDInstanceReconciler{
-		Client: controllerMgr.GetClient(),
-		Scheme: controllerMgr.GetScheme(),
-	}).SetupWithManager(controllerMgr)
-	Expect(err).NotTo(HaveOccurred())
-
-	go func() {
-		defer GinkgoRecover()
-		err = controllerMgr.Start(ctx)
-		Expect(err).NotTo(HaveOccurred())
-	}()
 })
 
 var _ = AfterSuite(func() {
@@ -689,8 +646,8 @@ func createAPIKeySecret(name, namespace, apiKey string) *corev1.Secret {
 
 func reconcileUser(name, namespace string) (ctrl.Result, error) {
 	r := &controller.PocketIDUserReconciler{
-		Client: testClient,
-		Scheme: testClient.Scheme(),
+		Client: k8sClient,
+		Scheme: k8sClient.Scheme(),
 	}
 	return r.Reconcile(ctx, reconcile.Request{
 		NamespacedName: types.NamespacedName{Name: name, Namespace: namespace},
@@ -699,8 +656,8 @@ func reconcileUser(name, namespace string) (ctrl.Result, error) {
 
 func reconcileUserGroup(name, namespace string) (ctrl.Result, error) {
 	r := &controller.PocketIDUserGroupReconciler{
-		Client: testClient,
-		Scheme: testClient.Scheme(),
+		Client: k8sClient,
+		Scheme: k8sClient.Scheme(),
 	}
 	return r.Reconcile(ctx, reconcile.Request{
 		NamespacedName: types.NamespacedName{Name: name, Namespace: namespace},
@@ -709,8 +666,8 @@ func reconcileUserGroup(name, namespace string) (ctrl.Result, error) {
 
 func reconcileOIDCClient(name, namespace string) (ctrl.Result, error) {
 	r := &controller.PocketIDOIDCClientReconciler{
-		Client: testClient,
-		Scheme: testClient.Scheme(),
+		Client: k8sClient,
+		Scheme: k8sClient.Scheme(),
 	}
 	return r.Reconcile(ctx, reconcile.Request{
 		NamespacedName: types.NamespacedName{Name: name, Namespace: namespace},
@@ -719,8 +676,8 @@ func reconcileOIDCClient(name, namespace string) (ctrl.Result, error) {
 
 func reconcileInstance(name, namespace string) (ctrl.Result, error) {
 	r := &controller.PocketIDInstanceReconciler{
-		Client: testClient,
-		Scheme: testClient.Scheme(),
+		Client: k8sClient,
+		Scheme: k8sClient.Scheme(),
 	}
 	return r.Reconcile(ctx, reconcile.Request{
 		NamespacedName: types.NamespacedName{Name: name, Namespace: namespace},
@@ -943,10 +900,7 @@ var _ = Describe("PocketIDUser Reconciliation", func() {
 		userID := fetched.Status.UserID
 		Expect(userID).NotTo(BeEmpty())
 
-		now := metav1.Now()
-		fetched.DeletionTimestamp = &now
-		fetched.Finalizers = []string{"pocketid.tobiash.github.io/user-finalizer"}
-		err = k8sClient.Update(ctx, fetched)
+		err = k8sClient.Delete(ctx, fetched)
 		Expect(err).NotTo(HaveOccurred())
 
 		_, err = reconcileUser(userName, namespace)
@@ -1187,6 +1141,9 @@ var _ = Describe("PocketIDInstance Reconciliation", func() {
 		_, err = reconcileInstance(instanceName, namespace)
 		Expect(err).NotTo(HaveOccurred())
 
+		_, err = reconcileInstance(instanceName, namespace)
+		Expect(err).NotTo(HaveOccurred())
+
 		secret := &corev1.Secret{}
 		err = k8sClient.Get(ctx, types.NamespacedName{Name: instanceName + "-api-key", Namespace: namespace}, secret)
 		Expect(err).NotTo(HaveOccurred())
@@ -1204,6 +1161,20 @@ var _ = Describe("PocketIDInstance Reconciliation", func() {
 			},
 		}
 		err := k8sClient.Create(ctx, instance)
+		Expect(err).NotTo(HaveOccurred())
+
+		_, err = reconcileInstance(instanceName, namespace)
+		Expect(err).NotTo(HaveOccurred())
+
+		_, err = reconcileInstance(instanceName, namespace)
+		Expect(err).NotTo(HaveOccurred())
+
+		sts := &appsv1.StatefulSet{}
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: instanceName, Namespace: namespace}, sts)
+		Expect(err).NotTo(HaveOccurred())
+		sts.Status.ReadyReplicas = 1
+		sts.Status.Replicas = 1
+		err = k8sClient.Status().Update(ctx, sts)
 		Expect(err).NotTo(HaveOccurred())
 
 		_, err = reconcileInstance(instanceName, namespace)
