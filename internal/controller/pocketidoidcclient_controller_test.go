@@ -71,8 +71,7 @@ var _ = Describe("PocketIDOIDCClient Controller", func() {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				if createdClientID != "" {
-					// Return our created client
-					w.Write([]byte(fmt.Sprintf(`{"data": [{"id": "%s", "name": "%s", "clientId": "test-client-id"}]}`, createdClientID, clientName)))
+					fmt.Fprintf(w, `{"data": [{"id": "%s", "name": "%s", "clientId": "test-client-id"}]}`, createdClientID, clientName)
 				} else {
 					w.Write([]byte(`{"data": []}`))
 				}
@@ -85,7 +84,7 @@ var _ = Describe("PocketIDOIDCClient Controller", func() {
 				if id == createdClientID {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusOK)
-					w.Write([]byte(fmt.Sprintf(`{"id": "%s", "name": "%s", "clientId": "test-client-id"}`, createdClientID, clientName)))
+					fmt.Fprintf(w, `{"id": "%s", "name": "%s", "clientId": "test-client-id"}`, createdClientID, clientName)
 					return
 				}
 				w.WriteHeader(http.StatusNotFound)
@@ -101,7 +100,7 @@ var _ = Describe("PocketIDOIDCClient Controller", func() {
 				}
 				createdClientID = "generated-uuid-123"
 				w.WriteHeader(http.StatusCreated)
-				w.Write([]byte(fmt.Sprintf(`{"id": "%s", "name": "%s", "clientId": "test-client-id"}`, createdClientID, body["name"])))
+				fmt.Fprintf(w, `{"id": "%s", "name": "%s", "clientId": "test-client-id"}`, createdClientID, body["name"])
 				return
 			}
 
@@ -117,7 +116,7 @@ var _ = Describe("PocketIDOIDCClient Controller", func() {
 				id := r.URL.Path[len("/api/oidc/clients/"):]
 				if id == createdClientID {
 					w.WriteHeader(http.StatusOK)
-					w.Write([]byte(fmt.Sprintf(`{"id": "%s", "name": "%s", "clientId": "test-client-id"}`, id, clientName)))
+					fmt.Fprintf(w, `{"id": "%s", "name": "%s", "clientId": "test-client-id"}`, id, clientName)
 					return
 				}
 				w.WriteHeader(http.StatusNotFound)

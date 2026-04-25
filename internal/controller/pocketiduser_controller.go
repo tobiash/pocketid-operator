@@ -321,7 +321,7 @@ func (r *PocketIDUserReconciler) syncGroupMemberships(ctx context.Context, apiCl
 	}
 
 	if needsUpdate {
-		var groupIDs []string
+		groupIDs := make([]string, 0, len(desiredGroupIDs))
 		for gid := range desiredGroupIDs {
 			groupIDs = append(groupIDs, gid)
 		}
