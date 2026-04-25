@@ -52,14 +52,11 @@ type PocketIDUserReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch
 
 func (r *PocketIDUserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-
 	user := &pocketidv1alpha1.PocketIDUser{}
 	if err := r.Get(ctx, req.NamespacedName, user); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Fetch the PocketIDInstance (may be cross-namespace)
 	instance, err := ResolveInstanceReference(ctx, r.Client, user.Spec.InstanceRef, user.Namespace)
 	if err != nil {
 		return r.updateErrorStatus(ctx, user, "InstanceNotFound", err)
@@ -78,24 +75,10 @@ func (r *PocketIDUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return r.updateErrorStatus(ctx, user, "APIClientCreationFailed", err)
 	}
 
-	// Handle deletion
 	if !user.DeletionTimestamp.IsZero() {
-		if controllerutil.ContainsFinalizer(user, userFinalizer) {
-			if user.Status.UserID != "" {
-				if err := apiClient.DeleteUser(ctx, user.Status.UserID); err != nil {
-					return r.updateErrorStatus(ctx, user, "DeleteUserFailed", err)
-				}
-			}
-
-			controllerutil.RemoveFinalizer(user, userFinalizer)
-			if err := r.Update(ctx, user); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		return ctrl.Result{}, nil
+		return r.handleDeletion(ctx, user, apiClient)
 	}
 
-	// Add finalizer
 	if !controllerutil.ContainsFinalizer(user, userFinalizer) {
 		controllerutil.AddFinalizer(user, userFinalizer)
 		if err := r.Update(ctx, user); err != nil {
@@ -103,94 +86,17 @@ func (r *PocketIDUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	// Sync logic
-	var pocketIDUser *pocketid.User
-
-	// Check if user exists
-	if user.Status.UserID != "" {
-		pocketIDUser, err = apiClient.GetUser(ctx, user.Status.UserID)
-		if err != nil {
-			return r.updateErrorStatus(ctx, user, "GetUserFailed", err)
-		}
-	} else {
-		// Try to find by username
-		users, err := apiClient.ListUsers(ctx)
-		if err != nil {
-			return r.updateErrorStatus(ctx, user, "ListUsersFailed", err)
-		}
-		for _, u := range users {
-			if u.Username == user.Spec.Username {
-				pocketIDUser = &u
-				break
-			}
-		}
+	pocketIDUser, err := r.resolveOrCreateUser(ctx, apiClient, user)
+	if err != nil {
+		return r.updateErrorStatus(ctx, user, "UserSyncFailed", err)
 	}
 
-	// Build target user
-	targetUser := &pocketid.User{
-		Username:    user.Spec.Username,
-		FirstName:   user.Spec.FirstName,
-		DisplayName: user.Spec.DisplayName,
-		IsAdmin:     user.Spec.IsAdmin,
-		Disabled:    user.Spec.Disabled,
-		Email:       user.Spec.Email,
-	}
-
-	if user.Spec.LastName != "" {
-		targetUser.LastName = &user.Spec.LastName
-	}
-	if user.Spec.Locale != "" {
-		targetUser.Locale = &user.Spec.Locale
-	}
-
-	if pocketIDUser == nil {
-		// Create
-		logger.Info("Creating user", "username", targetUser.Username)
-		created, err := apiClient.CreateUser(ctx, targetUser)
-		if err != nil {
-			return r.updateErrorStatus(ctx, user, "CreateUserFailed", err)
-		}
-		pocketIDUser = created
-		user.Status.UserID = created.ID
-	} else {
-		// Update if needed
-		targetUser.ID = pocketIDUser.ID
-		if needsUserUpdate(pocketIDUser, targetUser) {
-			logger.Info("Updating user", "id", pocketIDUser.ID)
-			updated, err := apiClient.UpdateUser(ctx, pocketIDUser.ID, targetUser)
-			if err != nil {
-				return r.updateErrorStatus(ctx, user, "UpdateUserFailed", err)
-			}
-			pocketIDUser = updated
-		}
-	}
-
-	// Sync group memberships
 	if err := r.syncGroupMemberships(ctx, apiClient, user, pocketIDUser); err != nil {
 		return r.updateErrorStatus(ctx, user, "GroupSyncFailed", err)
 	}
 
-	// Handle onboarding email
-	if user.Spec.SendOnboardingEmail && !user.Status.OnboardingEmailSent {
-		logger.Info("Creating one-time access token", "userId", pocketIDUser.ID)
-		resp, err := apiClient.CreateOneTimeAccessToken(ctx, pocketIDUser.ID)
-		if err != nil {
-			logger.Error(err, "Failed to create one-time access token")
-		} else {
-			now := metav1.Now()
-			user.Status.OnboardingEmailSent = true
-			user.Status.OnboardingEmailSentAt = &now
+	r.handleOnboarding(ctx, apiClient, user, pocketIDUser, instance)
 
-			if user.Spec.OneTimeAccessSecretRef != nil && resp != nil {
-				link := fmt.Sprintf("%s/login/%s", instance.Spec.AppURL, resp.Token)
-				if err := r.storeOneTimeAccessLink(ctx, user, link); err != nil {
-					logger.Error(err, "Failed to store one-time access link")
-				}
-			}
-		}
-	}
-
-	// Update status
 	userID := pocketIDUser.ID
 	if err := r.Get(ctx, client.ObjectKeyFromObject(user), user); err != nil {
 		return ctrl.Result{}, err
@@ -215,6 +121,106 @@ func (r *PocketIDUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+}
+
+func (r *PocketIDUserReconciler) handleDeletion(ctx context.Context, user *pocketidv1alpha1.PocketIDUser, apiClient *pocketid.Client) (ctrl.Result, error) {
+	if controllerutil.ContainsFinalizer(user, userFinalizer) {
+		if user.Status.UserID != "" {
+			if err := apiClient.DeleteUser(ctx, user.Status.UserID); err != nil {
+				return r.updateErrorStatus(ctx, user, "DeleteUserFailed", err)
+			}
+		}
+
+		controllerutil.RemoveFinalizer(user, userFinalizer)
+		if err := r.Update(ctx, user); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *PocketIDUserReconciler) resolveOrCreateUser(ctx context.Context, apiClient *pocketid.Client, user *pocketidv1alpha1.PocketIDUser) (*pocketid.User, error) {
+	var pocketIDUser *pocketid.User
+	var err error
+
+	if user.Status.UserID != "" {
+		pocketIDUser, err = apiClient.GetUser(ctx, user.Status.UserID)
+		if err != nil {
+			return nil, fmt.Errorf("GetUserFailed: %w", err)
+		}
+		return pocketIDUser, nil
+	}
+
+	users, err := apiClient.ListUsers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("ListUsersFailed: %w", err)
+	}
+	for _, u := range users {
+		if u.Username == user.Spec.Username {
+			pocketIDUser = &u
+			break
+		}
+	}
+
+	targetUser := &pocketid.User{
+		Username:    user.Spec.Username,
+		FirstName:   user.Spec.FirstName,
+		DisplayName: user.Spec.DisplayName,
+		IsAdmin:     user.Spec.IsAdmin,
+		Disabled:    user.Spec.Disabled,
+		Email:       user.Spec.Email,
+	}
+	if user.Spec.LastName != "" {
+		targetUser.LastName = &user.Spec.LastName
+	}
+	if user.Spec.Locale != "" {
+		targetUser.Locale = &user.Spec.Locale
+	}
+
+	if pocketIDUser == nil {
+		created, err := apiClient.CreateUser(ctx, targetUser)
+		if err != nil {
+			return nil, fmt.Errorf("CreateUserFailed: %w", err)
+		}
+		pocketIDUser = created
+		user.Status.UserID = created.ID
+	} else {
+		targetUser.ID = pocketIDUser.ID
+		if needsUserUpdate(pocketIDUser, targetUser) {
+			updated, err := apiClient.UpdateUser(ctx, pocketIDUser.ID, targetUser)
+			if err != nil {
+				return nil, fmt.Errorf("UpdateUserFailed: %w", err)
+			}
+			pocketIDUser = updated
+		}
+	}
+
+	return pocketIDUser, nil
+}
+
+func (r *PocketIDUserReconciler) handleOnboarding(ctx context.Context, apiClient *pocketid.Client, user *pocketidv1alpha1.PocketIDUser, pocketIDUser *pocketid.User, instance *pocketidv1alpha1.PocketIDInstance) {
+	if !user.Spec.SendOnboardingEmail || user.Status.OnboardingEmailSent {
+		return
+	}
+
+	logger := log.FromContext(ctx)
+	logger.Info("Creating one-time access token", "userId", pocketIDUser.ID)
+	resp, err := apiClient.CreateOneTimeAccessToken(ctx, pocketIDUser.ID)
+	if err != nil {
+		logger.Error(err, "Failed to create one-time access token")
+		return
+	}
+
+	now := metav1.Now()
+	user.Status.OnboardingEmailSent = true
+	user.Status.OnboardingEmailSentAt = &now
+
+	if user.Spec.OneTimeAccessSecretRef != nil && resp != nil {
+		link := fmt.Sprintf("%s/login/%s", instance.Spec.AppURL, resp.Token)
+		if err := r.storeOneTimeAccessLink(ctx, user, link); err != nil {
+			logger.Error(err, "Failed to store one-time access link")
+		}
+	}
 }
 
 func (r *PocketIDUserReconciler) updateErrorStatus(ctx context.Context, user *pocketidv1alpha1.PocketIDUser, reason string, reconcileErr error) (ctrl.Result, error) {
@@ -345,6 +351,7 @@ func (r *PocketIDUserReconciler) storeOneTimeAccessLink(ctx context.Context, use
 		return err
 	}
 
+	//nolint:staticcheck // SA1019: client.Apply is deprecated but the replacement requires ApplyConfiguration types
 	return r.Client.Patch(ctx, secret, client.Apply, client.FieldOwner("pocketid-operator"), client.ForceOwnership)
 }
 

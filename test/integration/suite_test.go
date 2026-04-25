@@ -223,7 +223,9 @@ func (m *MockServer) handler() http.HandlerFunc {
 			m.listOIDCClients(w, r)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/oidc/clients":
 			m.createOIDCClient(w, r)
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/secret") && strings.Contains(r.URL.Path, "/oidc/clients/"):
+		case r.Method == http.MethodPost &&
+			strings.HasSuffix(r.URL.Path, "/secret") &&
+			strings.Contains(r.URL.Path, "/oidc/clients/"):
 			parts := strings.Split(r.URL.Path, "/")
 			id := parts[len(parts)-2]
 			m.generateClientSecret(w, r, id)
@@ -256,7 +258,7 @@ func (m *MockServer) checkDelay(op string) {
 	}
 }
 
-func (m *MockServer) listUsers(w http.ResponseWriter, r *http.Request) {
+func (m *MockServer) listUsers(w http.ResponseWriter, _ *http.Request) {
 	m.checkDelay("ListUsers")
 	if err := m.checkError("ListUsers"); err != nil {
 		writeError(w, err)
@@ -315,7 +317,7 @@ func (m *MockServer) createUser(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(user)
 }
 
-func (m *MockServer) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
+func (m *MockServer) deleteUser(w http.ResponseWriter, _ *http.Request, id string) {
 	m.checkDelay("DeleteUser")
 	if err := m.checkError("DeleteUser"); err != nil {
 		writeError(w, err)
@@ -329,7 +331,7 @@ func (m *MockServer) deleteUser(w http.ResponseWriter, r *http.Request, id strin
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (m *MockServer) listGroups(w http.ResponseWriter, r *http.Request) {
+func (m *MockServer) listGroups(w http.ResponseWriter, _ *http.Request) {
 	m.checkDelay("ListGroups")
 	if err := m.checkError("ListGroups"); err != nil {
 		writeError(w, err)
@@ -384,7 +386,7 @@ func (m *MockServer) createGroup(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(group)
 }
 
-func (m *MockServer) deleteGroup(w http.ResponseWriter, r *http.Request, id string) {
+func (m *MockServer) deleteGroup(w http.ResponseWriter, _ *http.Request, id string) {
 	m.checkDelay("DeleteGroup")
 	if err := m.checkError("DeleteGroup"); err != nil {
 		writeError(w, err)
@@ -398,7 +400,7 @@ func (m *MockServer) deleteGroup(w http.ResponseWriter, r *http.Request, id stri
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (m *MockServer) listOIDCClients(w http.ResponseWriter, r *http.Request) {
+func (m *MockServer) listOIDCClients(w http.ResponseWriter, _ *http.Request) {
 	m.checkDelay("ListOIDCClients")
 	if err := m.checkError("ListOIDCClients"); err != nil {
 		writeError(w, err)
@@ -464,7 +466,7 @@ func (m *MockServer) createOIDCClient(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (m *MockServer) generateClientSecret(w http.ResponseWriter, r *http.Request, id string) {
+func (m *MockServer) generateClientSecret(w http.ResponseWriter, _ *http.Request, id string) {
 	m.checkDelay("GenerateClientSecret")
 	if err := m.checkError("GenerateClientSecret"); err != nil {
 		writeError(w, err)
@@ -523,7 +525,7 @@ func (m *MockServer) updateOIDCClient(w http.ResponseWriter, r *http.Request, id
 	})
 }
 
-func (m *MockServer) deleteOIDCClient(w http.ResponseWriter, r *http.Request, id string) {
+func (m *MockServer) deleteOIDCClient(w http.ResponseWriter, _ *http.Request, id string) {
 	m.checkDelay("DeleteOIDCClient")
 	if err := m.checkError("DeleteOIDCClient"); err != nil {
 		writeError(w, err)
@@ -573,7 +575,10 @@ var _ = BeforeSuite(func() {
 	By("bootstrapping test environment")
 	envtestBin := filepath.Join("..", "..", "bin", "k8s", "1.29.0-linux-amd64")
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases"), filepath.Join("..", "..", "bin", "gateway-api-crds")},
+		CRDDirectoryPaths: []string{
+			filepath.Join("..", "..", "config", "crd", "bases"),
+			filepath.Join("..", "..", "bin", "gateway-api-crds"),
+		},
 		ErrorIfCRDPathMissing: true,
 		BinaryAssetsDirectory: envtestBin,
 	}
@@ -586,7 +591,7 @@ var _ = BeforeSuite(func() {
 	err = pocketidv1alpha1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
-	err = gatewayv1.AddToScheme(scheme.Scheme)
+	err = gatewayv1.Install(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
@@ -610,7 +615,7 @@ var _ = BeforeEach(func() {
 	mockServer.Reset()
 })
 
-func createTestInstance(name, namespace string) *pocketidv1alpha1.PocketIDInstance {
+func createTestInstance(name, namespace string) {
 	instance := &pocketidv1alpha1.PocketIDInstance{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -625,10 +630,9 @@ func createTestInstance(name, namespace string) *pocketidv1alpha1.PocketIDInstan
 	}
 	err := k8sClient.Create(ctx, instance)
 	Expect(err).NotTo(HaveOccurred())
-	return instance
 }
 
-func createAPIKeySecret(name, namespace, apiKey string) *corev1.Secret {
+func createAPIKeySecret(name, namespace, apiKey string) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -641,7 +645,6 @@ func createAPIKeySecret(name, namespace, apiKey string) *corev1.Secret {
 	}
 	err := k8sClient.Create(ctx, secret)
 	Expect(err).NotTo(HaveOccurred())
-	return secret
 }
 
 func reconcileUser(name, namespace string) (ctrl.Result, error) {
@@ -697,37 +700,16 @@ func getFreshUser(name, namespace string) *pocketidv1alpha1.PocketIDUser {
 	return user
 }
 
-func getUserGroup(name, namespace string) *pocketidv1alpha1.PocketIDUserGroup {
-	group := &pocketidv1alpha1.PocketIDUserGroup{}
-	err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, group)
-	Expect(err).NotTo(HaveOccurred())
-	return group
-}
-
 func getFreshUserGroup(name, namespace string) *pocketidv1alpha1.PocketIDUserGroup {
 	group := &pocketidv1alpha1.PocketIDUserGroup{}
 	_ = k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, group)
 	return group
 }
 
-func getOIDCClient(name, namespace string) *pocketidv1alpha1.PocketIDOIDCClient {
-	client := &pocketidv1alpha1.PocketIDOIDCClient{}
-	err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, client)
-	Expect(err).NotTo(HaveOccurred())
-	return client
-}
-
 func getFreshOIDCClient(name, namespace string) *pocketidv1alpha1.PocketIDOIDCClient {
 	client := &pocketidv1alpha1.PocketIDOIDCClient{}
 	_ = k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, client)
 	return client
-}
-
-func getInstance(name, namespace string) *pocketidv1alpha1.PocketIDInstance {
-	instance := &pocketidv1alpha1.PocketIDInstance{}
-	err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, instance)
-	Expect(err).NotTo(HaveOccurred())
-	return instance
 }
 
 func getFreshInstance(name, namespace string) *pocketidv1alpha1.PocketIDInstance {
