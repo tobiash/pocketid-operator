@@ -329,7 +329,7 @@ func (r *PocketIDInstanceReconciler) reconcileConfigMap(ctx context.Context, ins
 			Namespace: instance.Namespace,
 		},
 		Data: map[string]string{
-			"PUBLIC_APP_URL":   instance.Spec.AppURL,
+			"APP_URL":          instance.Spec.AppURL,
 			"TRUST_PROXY":      fmt.Sprintf("%t", instance.Spec.TrustProxy),
 			"SESSION_DURATION": fmt.Sprintf("%d", instance.Spec.SessionDuration),
 			"DB_PROVIDER":      instance.Spec.Database.Provider,
