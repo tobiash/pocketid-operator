@@ -12,6 +12,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  MANIFESTS_REPO: ${{ github.repository }}-manifests
 
 jobs:
   release:
@@ -46,9 +47,27 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
+      - name: Setup Kustomize
+        uses: imranismail/setup-kustomize@v2
+
+      - name: Setup Flux CLI
+        uses: fluxcd/flux2/action@main
+
       - name: Generate release manifest
         run: |
           IMG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}" make build-installer
+
+      - name: Push OCI artifact
+        run: |
+          flux push artifact oci://${{ env.REGISTRY }}/${{ env.MANIFESTS_REPO }}:${{ github.ref_name }} \
+            --path="./dist" \
+            --source="$(git config --get remote.origin.url)" \
+            --revision="${{ github.ref_name }}@sha1:$(git rev-parse HEAD)"
+
+      - name: Tag latest
+        if: "!contains(github.ref_name, '-rc.') && !contains(github.ref_name, '-beta.') && !contains(github.ref_name, '-alpha.')"
+        run: |
+          flux tag artifact oci://${{ env.REGISTRY }}/${{ env.MANIFESTS_REPO }}:${{ github.ref_name }} --tag latest
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

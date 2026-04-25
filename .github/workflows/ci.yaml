@@ -13,6 +13,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  MANIFESTS_REPO: ${{ github.repository }}-manifests
 
 jobs:
   test:
@@ -74,3 +75,18 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Setup Kustomize
+        uses: imranismail/setup-kustomize@v2
+
+      - name: Setup Flux CLI
+        uses: fluxcd/flux2/action@main
+
+      - name: Generate and push OCI manifest artifact
+        run: |
+          IMG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-$(git rev-parse --short HEAD)" make build-installer
+          flux push artifact oci://${{ env.REGISTRY }}/${{ env.MANIFESTS_REPO }}:sha-$(git rev-parse --short HEAD) \
+            --path="./dist" \
+            --source="$(git config --get remote.origin.url)" \
+            --revision="main@sha1:$(git rev-parse HEAD)"
+          flux tag artifact oci://${{ env.REGISTRY }}/${{ env.MANIFESTS_REPO }}:sha-$(git rev-parse --short HEAD) --tag latest

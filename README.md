@@ -21,20 +21,55 @@ Compatible with **PocketID v2**.
 - kubectl
 - Access to a Kubernetes 1.29+ cluster
 
-## Quick Start
+## Installation
 
-### Install CRDs
+### Flux (OCI Artifact)
 
-```sh
-make install
+The operator publishes manifests as an OCI artifact to GHCR on every release and main branch push. Create an image pull secret for GHCR if the repo is private, then:
+
+```yaml
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: pocketid-operator
+  namespace: flux-system
+spec:
+  interval: 10m
+  url: oci://ghcr.io/tobiash/pocketid-operator-manifests
+  ref:
+    semver: ">=0.0.0-0"
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: pocketid-operator
+  namespace: flux-system
+spec:
+  interval: 10m
+  prune: true
+  wait: true
+  sourceRef:
+    kind: OCIRepository
+    name: pocketid-operator
+  path: ./
 ```
 
-### Build and Deploy
+For pre-releases, pin the tag directly:
+
+```yaml
+spec:
+  ref:
+    tag: v0.1.0-rc.1
+```
+
+### Manual
 
 ```sh
 make docker-build docker-push IMG=<your-registry>/pocketid-operator:latest
 make deploy IMG=<your-registry>/pocketid-operator:latest
 ```
+
+## Quick Start
 
 ### Create a PocketID Instance
 
