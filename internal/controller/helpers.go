@@ -43,10 +43,8 @@ func createAPIClient(ctx context.Context, c client.Client, instance *pocketidv1a
 		return nil, ErrAPIKeyNotFound
 	}
 
-	// Determine base URL
-	baseURL := instance.Spec.AppURL
+	baseURL := instance.Status.InternalURL
 
-	// If running in development mode (not in cluster), use env var override
 	if os.Getenv("KUBERNETES_SERVICE_HOST") == "" {
 		if devURL := os.Getenv("POCKETID_DEV_API_URL"); devURL != "" {
 			baseURL = devURL
