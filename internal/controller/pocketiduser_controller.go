@@ -365,8 +365,13 @@ func (r *PocketIDUserReconciler) storeOneTimeAccessLink(ctx context.Context, use
 		return err
 	}
 
-	//nolint:staticcheck // SA1019: client.Apply is deprecated but the replacement requires ApplyConfiguration types
-	return r.Client.Patch(ctx, secret, client.Apply, client.FieldOwner("pocketid-operator"), client.ForceOwnership)
+	existing := &corev1.Secret{}
+	err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: user.Namespace}, existing)
+	if err != nil {
+		return r.Create(ctx, secret)
+	}
+	existing.Data = secret.Data
+	return r.Update(ctx, existing)
 }
 
 // getAPIClient creates a PocketID API client for the instance
