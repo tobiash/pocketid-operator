@@ -507,7 +507,7 @@ func (r *PocketIDInstanceReconciler) reconcileStatefulSet(ctx context.Context, i
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      "data",
-									MountPath: "/app/backend/data",
+									MountPath: "/app/data",
 								},
 							},
 						},
