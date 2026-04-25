@@ -43,7 +43,7 @@ func (c *Client) DeleteUser(ctx context.Context, id string) error {
 
 func (c *Client) CreateOneTimeAccessToken(ctx context.Context, userID string) (*OnboardingResponse, error) {
 	var resp OnboardingResponse
-	if err := c.doRequest(ctx, "POST", fmt.Sprintf("/api/users/%s/one-time-access-token", userID), nil, &resp); err != nil {
+	if err := c.doRequest(ctx, "POST", fmt.Sprintf("/api/users/%s/one-time-access-token", userID), map[string]any{}, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil

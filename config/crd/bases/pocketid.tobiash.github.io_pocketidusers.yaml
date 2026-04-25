@@ -94,9 +94,9 @@ spec:
                 type: string
               oneTimeAccessSecretRef:
                 description: |-
-                  OneTimeAccessSecretRef - if set, operator writes the one-time access link
-                  to this secret instead of/in addition to sending email.
-                  Useful for testing without SMTP or programmatic onboarding.
+                  OneTimeAccessSecretRef specifies the secret to store the one-time access link.
+                  Defaults to "<user-cr-name>-onboarding" if not set.
+                  Set to empty name to disable automatic onboarding link creation.
                 properties:
                   name:
                     description: Name of the referenced object
@@ -207,6 +207,10 @@ spec:
                 description: OnboardingEmailSentAt is when the email was sent
                 format: date-time
                 type: string
+              onboardingLinkCreated:
+                description: OnboardingLinkCreated indicates if a one-time access
+                  link has been created
+                type: boolean
               ready:
                 description: Ready indicates if the user is synced with PocketID
                 type: boolean

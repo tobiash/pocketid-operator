@@ -62,9 +62,9 @@ type PocketIDUserSpec struct {
 	// Requires SMTP to be configured on the PocketIDInstance
 	SendOnboardingEmail bool `json:"sendOnboardingEmail,omitempty"`
 
-	// OneTimeAccessSecretRef - if set, operator writes the one-time access link
-	// to this secret instead of/in addition to sending email.
-	// Useful for testing without SMTP or programmatic onboarding.
+	// OneTimeAccessSecretRef specifies the secret to store the one-time access link.
+	// Defaults to "<user-cr-name>-onboarding" if not set.
+	// Set to empty name to disable automatic onboarding link creation.
 	OneTimeAccessSecretRef *LocalObjectReference `json:"oneTimeAccessSecretRef,omitempty"`
 }
 
@@ -84,6 +84,9 @@ type PocketIDUserStatus struct {
 
 	// LastSyncTime is when the user was last synchronized
 	LastSyncTime *metav1.Time `json:"lastSyncTime,omitempty"`
+
+	// OnboardingLinkCreated indicates if a one-time access link has been created
+	OnboardingLinkCreated bool `json:"onboardingLinkCreated,omitempty"`
 
 	// OnboardingEmailSent indicates if the onboarding email was sent
 	OnboardingEmailSent bool `json:"onboardingEmailSent,omitempty"`

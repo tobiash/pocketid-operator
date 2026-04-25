@@ -199,28 +199,42 @@ func (r *PocketIDUserReconciler) resolveOrCreateUser(ctx context.Context, apiCli
 }
 
 func (r *PocketIDUserReconciler) handleOnboarding(ctx context.Context, apiClient *pocketid.Client, user *pocketidv1alpha1.PocketIDUser, pocketIDUser *pocketid.User, instance *pocketidv1alpha1.PocketIDInstance) {
-	if !user.Spec.SendOnboardingEmail || user.Status.OnboardingEmailSent {
+	logger := log.FromContext(ctx)
+
+	secretName := r.resolveOnboardingSecretName(user)
+	if secretName == "" || user.Status.OnboardingLinkCreated {
 		return
 	}
 
-	logger := log.FromContext(ctx)
-	logger.Info("Creating one-time access token", "userId", pocketIDUser.ID)
+	logger.Info("Creating one-time access token", "userId", pocketIDUser.ID, "secret", secretName)
 	resp, err := apiClient.CreateOneTimeAccessToken(ctx, pocketIDUser.ID)
 	if err != nil {
 		logger.Error(err, "Failed to create one-time access token")
 		return
 	}
 
-	now := metav1.Now()
-	user.Status.OnboardingEmailSent = true
-	user.Status.OnboardingEmailSentAt = &now
-
-	if user.Spec.OneTimeAccessSecretRef != nil && resp != nil {
+	if resp != nil {
 		link := fmt.Sprintf("%s/login/%s", instance.Spec.AppURL, resp.Token)
-		if err := r.storeOneTimeAccessLink(ctx, user, link); err != nil {
+		if err := r.storeOneTimeAccessLink(ctx, user, secretName, link); err != nil {
 			logger.Error(err, "Failed to store one-time access link")
+			return
 		}
 	}
+
+	user.Status.OnboardingLinkCreated = true
+
+	if user.Spec.SendOnboardingEmail && !user.Status.OnboardingEmailSent {
+		now := metav1.Now()
+		user.Status.OnboardingEmailSent = true
+		user.Status.OnboardingEmailSentAt = &now
+	}
+}
+
+func (r *PocketIDUserReconciler) resolveOnboardingSecretName(user *pocketidv1alpha1.PocketIDUser) string {
+	if user.Spec.OneTimeAccessSecretRef != nil {
+		return user.Spec.OneTimeAccessSecretRef.Name
+	}
+	return user.Name + "-onboarding"
 }
 
 func (r *PocketIDUserReconciler) updateErrorStatus(ctx context.Context, user *pocketidv1alpha1.PocketIDUser, reason string, reconcileErr error) (ctrl.Result, error) {
@@ -335,10 +349,10 @@ func (r *PocketIDUserReconciler) syncGroupMemberships(ctx context.Context, apiCl
 }
 
 // storeOneTimeAccessLink stores the one-time access link in a secret
-func (r *PocketIDUserReconciler) storeOneTimeAccessLink(ctx context.Context, user *pocketidv1alpha1.PocketIDUser, link string) error {
+func (r *PocketIDUserReconciler) storeOneTimeAccessLink(ctx context.Context, user *pocketidv1alpha1.PocketIDUser, secretName, link string) error {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      user.Spec.OneTimeAccessSecretRef.Name,
+			Name:      secretName,
 			Namespace: user.Namespace,
 		},
 		Type: corev1.SecretTypeOpaque,
