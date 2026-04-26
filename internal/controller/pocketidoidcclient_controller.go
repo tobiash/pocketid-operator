@@ -228,6 +228,7 @@ func (r *PocketIDOIDCClientReconciler) ensureCredentialsSecret(ctx context.Conte
 	secret.Data["OIDC_CLIENT_ID"] = []byte(pocketIDClient.ID)
 	secret.Data["OIDC_CLIENT_SECRET"] = []byte(clientSecret)
 	secret.Data["OIDC_ISSUER_URL"] = []byte(instance.Spec.AppURL)
+	secret.Data["client-secret"] = []byte(clientSecret)
 
 	if secretNeedsCreate {
 		if err := r.Create(ctx, secret); err != nil {
