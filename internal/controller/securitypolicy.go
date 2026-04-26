@@ -13,12 +13,6 @@ import (
 	pocketidv1alpha1 "github.com/tobiash/pocketid-operator/api/v1alpha1"
 )
 
-var securityPolicyGVR = schema.GroupVersionResource{
-	Group:    "gateway.envoyproxy.io",
-	Version:  "v1alpha1",
-	Resource: "securitypolicies",
-}
-
 var securityPolicyGVK = schema.GroupVersionKind{
 	Group:   "gateway.envoyproxy.io",
 	Version: "v1alpha1",
