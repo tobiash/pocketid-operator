@@ -162,6 +162,9 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				Namespace: route.Namespace,
 			},
 		}
+		desired.Spec.CredentialsSecretRef = &pocketidv1alpha1.LocalObjectReference{
+			Name: clientName + "-credentials",
+		}
 	}
 
 	if err := controllerutil.SetControllerReference(route, desired, r.Scheme); err != nil {
@@ -184,6 +187,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		existing.Spec.CallbackURLs = desired.Spec.CallbackURLs
 		existing.Spec.InstanceRef = desired.Spec.InstanceRef
 		existing.Spec.EnvoyGateway = desired.Spec.EnvoyGateway
+		existing.Spec.CredentialsSecretRef = desired.Spec.CredentialsSecretRef
 		if err := r.Update(ctx, existing); err != nil {
 			return ctrl.Result{}, err
 		}
