@@ -88,9 +88,9 @@ var _ = Describe("HTTPRoute Controller", func() {
 					Name:      HTTPRouteName,
 					Namespace: PocketIDNamespace,
 					Annotations: map[string]string{
-						"pocket-id.io/oidc-enabled": "true",
-						"pocket-id.io/instance":     PocketIDName,
-						"pocket-id.io/client-name":  OIDCClientName,
+						"pocketid.tobiash.github.io/oidc-enabled": "true",
+						"pocketid.tobiash.github.io/instance":     PocketIDName,
+						"pocketid.tobiash.github.io/client-name":  OIDCClientName,
 					},
 				},
 				Spec: gatewayv1.HTTPRouteSpec{
@@ -107,12 +107,57 @@ var _ = Describe("HTTPRoute Controller", func() {
 
 			Expect(oidcClient.Spec.Name).To(Equal(OIDCClientName))
 			Expect(oidcClient.Spec.InstanceRef.Name).To(Equal(PocketIDName))
-			Expect(oidcClient.Spec.CallbackURLs).To(ContainElement("https://app.example.com/callback"))
+			Expect(oidcClient.Spec.CallbackURLs).To(ContainElement("https://app.example.com/oauth2/callback"))
 
 			// Verify OwnerReference
 			Expect(oidcClient.OwnerReferences).To(HaveLen(1))
 			Expect(oidcClient.OwnerReferences[0].Name).To(Equal(HTTPRouteName))
 			Expect(oidcClient.OwnerReferences[0].Kind).To(Equal("HTTPRoute"))
+		})
+
+		It("Should set EnvoyGateway config when annotation is present", func() {
+			ctx := context.Background()
+
+			instance3 := &pocketidv1alpha1.PocketIDInstance{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pocketid-route-3",
+					Namespace: PocketIDNamespace,
+				},
+				Spec: pocketidv1alpha1.PocketIDInstanceSpec{
+					AppURL: "https://auth3.example.com",
+					InitialAdmin: &pocketidv1alpha1.InitialAdminConfig{
+						Email: "admin3@example.com", Username: "admin3", FirstName: "Admin", DisplayName: "Admin 3",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, instance3)).Should(Succeed())
+
+			route3 := &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route-3",
+					Namespace: PocketIDNamespace,
+					Annotations: map[string]string{
+						"pocketid.tobiash.github.io/oidc-enabled":  "true",
+						"pocketid.tobiash.github.io/instance":      "test-pocketid-route-3",
+						"pocketid.tobiash.github.io/envoy-gateway": "true",
+					},
+				},
+				Spec: gatewayv1.HTTPRouteSpec{
+					Hostnames: []gatewayv1.Hostname{"app3.example.com"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, route3)).Should(Succeed())
+
+			oidcClient := &pocketidv1alpha1.PocketIDOIDCClient{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: "test-route-3-oidc", Namespace: PocketIDNamespace}, oidcClient)
+			}, Timeout, Interval).Should(Succeed())
+
+			Expect(oidcClient.Spec.EnvoyGateway).NotTo(BeNil())
+			Expect(oidcClient.Spec.EnvoyGateway.Enabled).To(BeTrue())
+			Expect(oidcClient.Spec.EnvoyGateway.HTTPRouteRef).NotTo(BeNil())
+			Expect(oidcClient.Spec.EnvoyGateway.HTTPRouteRef.Name).To(Equal("test-route-3"))
+			Expect(oidcClient.Spec.EnvoyGateway.HTTPRouteRef.Namespace).To(Equal(PocketIDNamespace))
 		})
 
 		It("Should update PocketIDOIDCClient when HTTPRoute changes", func() {
@@ -142,9 +187,9 @@ var _ = Describe("HTTPRoute Controller", func() {
 					Name:      "test-route-2",
 					Namespace: PocketIDNamespace,
 					Annotations: map[string]string{
-						"pocket-id.io/oidc-enabled": "true",
-						"pocket-id.io/instance":     "test-pocketid-route-2",
-						"pocket-id.io/client-name":  "test-route-2-oidc",
+						"pocketid.tobiash.github.io/oidc-enabled": "true",
+						"pocketid.tobiash.github.io/instance":     "test-pocketid-route-2",
+						"pocketid.tobiash.github.io/client-name":  "test-route-2-oidc",
 					},
 				},
 				Spec: gatewayv1.HTTPRouteSpec{
@@ -171,7 +216,7 @@ var _ = Describe("HTTPRoute Controller", func() {
 					return nil
 				}
 				return oidcClient.Spec.CallbackURLs
-			}, Timeout, Interval).Should(ContainElement("https://new-app2.example.com/callback"))
+			}, Timeout, Interval).Should(ContainElement("https://new-app2.example.com/oauth2/callback"))
 		})
 	})
 })

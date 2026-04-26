@@ -10,7 +10,8 @@ The operator automates lifecycle management of PocketID resources:
 - **PocketIDOIDCClient** — Manages OIDC clients and stores credentials in Kubernetes secrets
 - **PocketIDUser** — Manages users with group membership sync and onboarding token support
 - **PocketIDUserGroup** — Manages user groups
-- **HTTPRoute integration** — Automatically creates OIDC clients for HTTPRoutes annotated with `pocket-id.io/oidc-enabled`
+- **HTTPRoute integration** — Automatically creates OIDC clients for HTTPRoutes annotated with `pocketid.tobiash.github.io/oidc-enabled`
+- **Envoy Gateway SecurityPolicy** — Automatically creates SecurityPolicy resources for OIDC-protected HTTPRoutes
 
 Compatible with **PocketID v2**.
 
@@ -139,7 +140,60 @@ spec:
     - name: developers
 ```
 
-### HTTPRoute OIDC Integration
+### Envoy Gateway SecurityPolicy
+
+When using [Envoy Gateway](https://gateway.envoyproxy.io/), the operator can automatically create `SecurityPolicy` resources to enforce OIDC authentication at the gateway level.
+
+#### Via HTTPRoute annotations
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: my-app
+  annotations:
+    pocketid.tobiash.github.io/oidc-enabled: "true"
+    pocketid.tobiash.github.io/instance: "my-instance"
+    pocketid.tobiash.github.io/envoy-gateway: "true"
+spec:
+  hostnames:
+    - myapp.example.com
+```
+
+The operator creates an OIDC client and a SecurityPolicy that protects the route with PocketID authentication.
+
+#### Via PocketIDOIDCClient CRD
+
+```yaml
+apiVersion: pocketid.tobiash.github.io/v1alpha1
+kind: PocketIDOIDCClient
+metadata:
+  name: my-app
+spec:
+  instanceRef:
+    name: my-instance
+  name: my-app
+  callbackURLs:
+    - https://myapp.example.com/oauth2/callback
+  credentialsSecretRef:
+    name: my-app-oidc-credentials
+  envoyGateway:
+    enabled: true
+    httpRouteRef:
+      name: my-app
+```
+
+#### Annotation Reference
+
+| Annotation | Description |
+|---|---|
+| `pocketid.tobiash.github.io/oidc-enabled` | Set to `"true"` to enable OIDC client creation |
+| `pocketid.tobiash.github.io/instance` | Instance name or `namespace/name` (auto-detected if only one instance in namespace) |
+| `pocketid.tobiash.github.io/client-name` | Override the OIDC client name (default: `<route-name>-oidc`) |
+| `pocketid.tobiash.github.io/redirect-paths` | Comma-separated callback paths (default: `/oauth2/callback`) |
+| `pocketid.tobiash.github.io/envoy-gateway` | Set to `"true"` to auto-create an Envoy Gateway SecurityPolicy |
+
+### HTTPRoute OIDC Integration (basic)
 
 Annotate an HTTPRoute to automatically create an OIDC client:
 
@@ -149,8 +203,8 @@ kind: HTTPRoute
 metadata:
   name: my-app
   annotations:
-    pocket-id.io/oidc-enabled: "true"
-    pocket-id.io/instance: "my-instance"
+    pocketid.tobiash.github.io/oidc-enabled: "true"
+    pocketid.tobiash.github.io/instance: "my-instance"
 spec:
   hostnames:
     - myapp.example.com

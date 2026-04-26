@@ -34,10 +34,11 @@ import (
 )
 
 const (
-	AnnotationOIDCEnabled   = "pocket-id.io/oidc-enabled"
-	AnnotationInstance      = "pocket-id.io/instance"
-	AnnotationClientName    = "pocket-id.io/client-name"
-	AnnotationRedirectPaths = "pocket-id.io/redirect-paths"
+	AnnotationOIDCEnabled   = "pocketid.tobiash.github.io/oidc-enabled"
+	AnnotationInstance      = "pocketid.tobiash.github.io/instance"
+	AnnotationClientName    = "pocketid.tobiash.github.io/client-name"
+	AnnotationRedirectPaths = "pocketid.tobiash.github.io/redirect-paths"
+	AnnotationEnvoyGateway  = "pocketid.tobiash.github.io/envoy-gateway"
 )
 
 // HTTPRouteReconciler reconciles a HTTPRoute object
@@ -127,13 +128,10 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			}
 		}
 	} else {
-		// Default path
+		// Default path: /oauth2/callback to match Envoy Gateway SecurityPolicy convention
 		for _, host := range route.Spec.Hostnames {
-			redirectURIs = append(redirectURIs, fmt.Sprintf("https://%s/callback", host))
+			redirectURIs = append(redirectURIs, fmt.Sprintf("https://%s/oauth2/callback", host))
 		}
-
-		// Also try typical oauth2-proxy /oauth2/callback if nothing else
-		// But let's stick to /callback as default unless specified
 	}
 
 	if len(redirectURIs) == 0 {
@@ -149,11 +147,21 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			Namespace: route.Namespace,
 		},
 		Spec: pocketidv1alpha1.PocketIDOIDCClientSpec{
-			Name:         clientName, // Display name
+			Name:         clientName,
 			InstanceRef:  instanceRef,
 			CallbackURLs: redirectURIs,
-			IsPublic:     false, // Usually backend apps are confidential
+			IsPublic:     false,
 		},
+	}
+
+	if route.Annotations[AnnotationEnvoyGateway] == "true" {
+		desired.Spec.EnvoyGateway = &pocketidv1alpha1.EnvoyGatewayConfig{
+			Enabled: true,
+			HTTPRouteRef: &pocketidv1alpha1.NamespacedObjectReference{
+				Name:      route.Name,
+				Namespace: route.Namespace,
+			},
+		}
 	}
 
 	if err := controllerutil.SetControllerReference(route, desired, r.Scheme); err != nil {
@@ -175,9 +183,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		// For now, simple overwrite of spec fields we manage
 		existing.Spec.CallbackURLs = desired.Spec.CallbackURLs
 		existing.Spec.InstanceRef = desired.Spec.InstanceRef
-		// We shouldn't overwrite IsPublic or others if user manually edited?
-		// But for GitOps/Annotation driven, the annotation is source of truth.
-		// Let's enforce annotation desired state.
+		existing.Spec.EnvoyGateway = desired.Spec.EnvoyGateway
 		if err := r.Update(ctx, existing); err != nil {
 			return ctrl.Result{}, err
 		}

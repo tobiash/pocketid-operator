@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	AnnotationOIDCEnabled = "pocket-id.io/oidc-enabled"
-	AnnotationInstance    = "pocket-id.io/instance"
+	AnnotationOIDCEnabled = "pocketid.tobiash.github.io/oidc-enabled"
+	AnnotationInstance    = "pocketid.tobiash.github.io/instance"
 )
 
 func TestHTTPRoute(t *testing.T) {
