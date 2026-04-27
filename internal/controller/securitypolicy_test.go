@@ -80,7 +80,7 @@ var _ = Describe("SecurityPolicy Builder", func() {
 		provider := oidc["provider"].(map[string]any)
 		Expect(provider["issuer"]).To(Equal("https://auth.example.com"))
 		Expect(provider["authorizationEndpoint"]).To(Equal("https://auth.example.com/authorize"))
-		Expect(provider["tokenEndpoint"]).To(Equal("https://auth.example.com/token"))
+		Expect(provider["tokenEndpoint"]).To(Equal("https://auth.example.com/api/oidc/token"))
 
 		secret := oidc["clientSecret"].(map[string]any)
 		Expect(secret["name"]).To(Equal("my-app-credentials"))

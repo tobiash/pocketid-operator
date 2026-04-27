@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -43,7 +44,7 @@ func buildSecurityPolicy(
 	hostname := string(route.Spec.Hostnames[0])
 	redirectURL := fmt.Sprintf("https://%s%s", hostname, callbackPath)
 
-	appURL := instance.Spec.AppURL
+	appURL := strings.TrimRight(instance.Spec.AppURL, "/")
 
 	sp := &unstructured.Unstructured{}
 	sp.SetGroupVersionKind(securityPolicyGVK)
@@ -62,7 +63,7 @@ func buildSecurityPolicy(
 			"provider": map[string]any{
 				"issuer":                appURL,
 				"authorizationEndpoint": appURL + "/authorize",
-				"tokenEndpoint":         appURL + "/token",
+				"tokenEndpoint":         appURL + "/api/oidc/token",
 			},
 			"clientID": oidcClient.Status.ClientID,
 			"clientSecret": map[string]any{
