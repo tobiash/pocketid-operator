@@ -96,6 +96,9 @@ func (r *PocketIDUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	r.handleOnboarding(ctx, apiClient, user, pocketIDUser, instance)
+	onboardingLinkCreated := user.Status.OnboardingLinkCreated
+	onboardingEmailSent := user.Status.OnboardingEmailSent
+	onboardingEmailSentAt := user.Status.OnboardingEmailSentAt
 
 	userID := pocketIDUser.ID
 	if err := r.Get(ctx, client.ObjectKeyFromObject(user), user); err != nil {
@@ -107,6 +110,11 @@ func (r *PocketIDUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	user.Status.Synced = true
 	user.Status.LastSyncTime = &now
 	user.Status.ObservedGeneration = user.Generation
+	user.Status.OnboardingLinkCreated = user.Status.OnboardingLinkCreated || onboardingLinkCreated
+	user.Status.OnboardingEmailSent = user.Status.OnboardingEmailSent || onboardingEmailSent
+	if onboardingEmailSentAt != nil {
+		user.Status.OnboardingEmailSentAt = onboardingEmailSentAt
+	}
 
 	meta.SetStatusCondition(&user.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
