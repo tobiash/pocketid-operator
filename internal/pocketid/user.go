@@ -29,6 +29,10 @@ func (c *Client) CreateUser(ctx context.Context, user *User) (*User, error) {
 	return &createdUser, nil
 }
 
+func (c *Client) CreateUserWithoutResult(ctx context.Context, user *User) error {
+	return c.doRequest(ctx, "POST", "/api/users", user, nil)
+}
+
 func (c *Client) UpdateUser(ctx context.Context, id string, user *User) (*User, error) {
 	var updatedUser User
 	if err := c.doRequest(ctx, "PUT", fmt.Sprintf("/api/users/%s", id), user, &updatedUser); err != nil {

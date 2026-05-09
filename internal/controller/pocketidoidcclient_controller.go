@@ -3,21 +3,17 @@ package controller
 import (
 	"context"
 	"fmt"
-	"os"
 	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	pocketidv1alpha1 "github.com/tobiash/pocketid-operator/api/v1alpha1"
 	"github.com/tobiash/pocketid-operator/internal/pocketid"
@@ -89,23 +85,19 @@ func (r *PocketIDOIDCClientReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	clientID := pocketIDClient.ID
 	credentialsSecretName := oidcClient.Status.CredentialsSecretName
+	securityPolicyName := oidcClient.Status.SecurityPolicyName
 	if err := r.Get(ctx, client.ObjectKeyFromObject(oidcClient), oidcClient); err != nil {
 		return ctrl.Result{}, err
 	}
 	oidcClient.Status.ClientID = clientID
 	oidcClient.Status.CredentialsSecretName = credentialsSecretName
+	oidcClient.Status.SecurityPolicyName = securityPolicyName
 	oidcClient.Status.Ready = true
 	oidcClient.Status.Synced = true
 	now := metav1.Now()
 	oidcClient.Status.LastSyncTime = &now
 
-	meta.SetStatusCondition(&oidcClient.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionTrue,
-		Reason:             "Synced",
-		Message:            "OIDC Client synced successfully",
-		ObservedGeneration: oidcClient.Generation,
-	})
+	setSyncedCondition(&oidcClient.Status.Conditions, oidcClient.Generation, "OIDC Client synced successfully")
 
 	if err := r.Status().Update(ctx, oidcClient); err != nil {
 		return ctrl.Result{}, err
@@ -156,6 +148,7 @@ func (r *PocketIDOIDCClientReconciler) resolveOrCreateClient(ctx context.Context
 		Name:         oidcClient.Spec.Name,
 		ID:           oidcClient.Spec.ClientID,
 		IsPublic:     oidcClient.Spec.IsPublic,
+		PkceEnabled:  oidcClient.Spec.PKCEEnabled,
 		CallbackURLs: oidcClient.Spec.CallbackURLs,
 	}
 
@@ -170,7 +163,7 @@ func (r *PocketIDOIDCClientReconciler) resolveOrCreateClient(ctx context.Context
 		oidcClient.Status.ClientID = created.ID
 	} else {
 		targetClient.ID = pocketIDClient.ID
-		if pocketIDClient.Name != targetClient.Name || !equalStrings(pocketIDClient.CallbackURLs, targetClient.CallbackURLs) {
+		if needsOIDCClientUpdate(pocketIDClient, targetClient) {
 			logger := log.FromContext(ctx)
 			logger.Info("Updating OIDC Client", "id", pocketIDClient.ID)
 			updated, err := apiClient.UpdateOIDCClient(ctx, pocketIDClient.ID, targetClient)
@@ -243,85 +236,13 @@ func (r *PocketIDOIDCClientReconciler) ensureCredentialsSecret(ctx context.Conte
 	return nil
 }
 
-func (r *PocketIDOIDCClientReconciler) ensureSecurityPolicy(ctx context.Context, oidcClient *pocketidv1alpha1.PocketIDOIDCClient, instance *pocketidv1alpha1.PocketIDInstance) error {
-	logger := log.FromContext(ctx)
-
-	if oidcClient.Spec.EnvoyGateway == nil || !oidcClient.Spec.EnvoyGateway.Enabled {
-		if oidcClient.Status.SecurityPolicyName != "" {
-			existing := &unstructured.Unstructured{}
-			existing.SetGroupVersionKind(securityPolicyGVK)
-			if err := r.Get(ctx, securityPolicyKey(oidcClient), existing); err == nil {
-				if err := r.Delete(ctx, existing); err != nil {
-					return fmt.Errorf("failed to delete SecurityPolicy: %w", err)
-				}
-				logger.Info("Deleted SecurityPolicy (envoyGateway disabled)")
-			}
-			oidcClient.Status.SecurityPolicyName = ""
-		}
-		return nil
-	}
-
-	if oidcClient.Status.ClientID == "" {
-		return fmt.Errorf("cannot create SecurityPolicy: client ID not yet available")
-	}
-	if oidcClient.Status.CredentialsSecretName == "" {
-		return fmt.Errorf("cannot create SecurityPolicy: credentials secret not yet available")
-	}
-
-	eg := oidcClient.Spec.EnvoyGateway
-	if eg.HTTPRouteRef == nil {
-		return fmt.Errorf("envoyGateway.httpRouteRef is required when envoyGateway is enabled")
-	}
-
-	routeNamespace := oidcClient.Namespace
-	if eg.HTTPRouteRef.Namespace != "" {
-		routeNamespace = eg.HTTPRouteRef.Namespace
-	}
-
-	route := &gatewayv1.HTTPRoute{}
-	if err := r.Get(ctx, client.ObjectKey{Name: eg.HTTPRouteRef.Name, Namespace: routeNamespace}, route); err != nil {
-		return fmt.Errorf("failed to get HTTPRoute %s/%s: %w", routeNamespace, eg.HTTPRouteRef.Name, err)
-	}
-
-	desired, err := buildSecurityPolicy(oidcClient, instance, route, oidcClient.Status.CredentialsSecretName, r.Scheme)
-	if err != nil {
-		return fmt.Errorf("failed to build SecurityPolicy: %w", err)
-	}
-
-	existing := &unstructured.Unstructured{}
-	existing.SetGroupVersionKind(securityPolicyGVK)
-	err = r.Get(ctx, securityPolicyKey(oidcClient), existing)
-	if apierrors.IsNotFound(err) {
-		logger.Info("Creating SecurityPolicy", "name", oidcClient.Name, "route", route.Name)
-		if err := r.Create(ctx, desired); err != nil {
-			return fmt.Errorf("failed to create SecurityPolicy: %w", err)
-		}
-	} else if err != nil {
-		return fmt.Errorf("failed to get SecurityPolicy: %w", err)
-	} else {
-		existing.Object["spec"] = desired.Object["spec"]
-		if err := r.Update(ctx, existing); err != nil {
-			return fmt.Errorf("failed to update SecurityPolicy: %w", err)
-		}
-	}
-
-	oidcClient.Status.SecurityPolicyName = oidcClient.Name
-	return nil
-}
-
 func (r *PocketIDOIDCClientReconciler) updateErrorStatus(ctx context.Context, oidcClient *pocketidv1alpha1.PocketIDOIDCClient, reason string, reconcileErr error) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Error(reconcileErr, "Reconciliation failed", "reason", reason)
 
 	oidcClient.Status.Ready = false
 	oidcClient.Status.Synced = false
-	meta.SetStatusCondition(&oidcClient.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionFalse,
-		Reason:             reason,
-		Message:            reconcileErr.Error(),
-		ObservedGeneration: oidcClient.Generation,
-	})
+	setErrorCondition(&oidcClient.Status.Conditions, oidcClient.Generation, reason, reconcileErr)
 
 	if updateErr := r.Status().Update(ctx, oidcClient); updateErr != nil {
 		logger.Error(updateErr, "Failed to update error status")
@@ -331,37 +252,14 @@ func (r *PocketIDOIDCClientReconciler) updateErrorStatus(ctx context.Context, oi
 }
 
 func (r *PocketIDOIDCClientReconciler) getAPIClient(ctx context.Context, instance *pocketidv1alpha1.PocketIDInstance) (*pocketid.Client, error) {
-	// Simple client creation logic, can be enhanced with caching
+	return createAPIClientWithDevDefault(ctx, r.Client, instance, "http://localhost:8080")
+}
 
-	// Get Secret
-	secret := &corev1.Secret{}
-	// Use the status secret name if available, else fallback or error
-	secretName := instance.Status.StaticAPIKeySecretName
-	if secretName == "" {
-		secretName = instance.Name + "-api-key" // Fallback guess
-	}
-
-	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: instance.Namespace}, secret); err != nil {
-		return nil, fmt.Errorf("failed to get API key secret: %w", err)
-	}
-
-	apiKey := string(secret.Data["STATIC_API_KEY"])
-
-	// URL construction
-	// Access via internal service
-	baseUrl := fmt.Sprintf("http://%s-svc.%s.svc.cluster.local", instance.Name, instance.Namespace)
-
-	// If running locally (not in cluster), default to localhost forward
-	if os.Getenv("KUBERNETES_SERVICE_HOST") == "" {
-		// Check if we can reach the in-cluster DNS provided for convenience, otherwise fallback
-		// Use env var for testing/custom local setup
-		baseUrl = os.Getenv("POCKETID_DEV_API_URL")
-		if baseUrl == "" {
-			baseUrl = "http://localhost:8080"
-		}
-	}
-
-	return pocketid.NewClient(baseUrl, apiKey), nil
+func needsOIDCClientUpdate(current, target *pocketid.OIDCClient) bool {
+	return current.Name != target.Name ||
+		current.IsPublic != target.IsPublic ||
+		current.PkceEnabled != target.PkceEnabled ||
+		!equalStrings(current.CallbackURLs, target.CallbackURLs)
 }
 
 func equalStrings(a, b []string) bool {

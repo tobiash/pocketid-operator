@@ -21,8 +21,6 @@ import (
 	"fmt"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -95,10 +93,7 @@ func (r *PocketIDUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return r.updateErrorStatus(ctx, user, "GroupSyncFailed", err)
 	}
 
-	r.handleOnboarding(ctx, apiClient, user, pocketIDUser, instance)
-	onboardingLinkCreated := user.Status.OnboardingLinkCreated
-	onboardingEmailSent := user.Status.OnboardingEmailSent
-	onboardingEmailSentAt := user.Status.OnboardingEmailSentAt
+	onboarding := r.reconcileOnboarding(ctx, apiClient, user, pocketIDUser, instance)
 
 	userID := pocketIDUser.ID
 	if err := r.Get(ctx, client.ObjectKeyFromObject(user), user); err != nil {
@@ -110,19 +105,13 @@ func (r *PocketIDUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	user.Status.Synced = true
 	user.Status.LastSyncTime = &now
 	user.Status.ObservedGeneration = user.Generation
-	user.Status.OnboardingLinkCreated = user.Status.OnboardingLinkCreated || onboardingLinkCreated
-	user.Status.OnboardingEmailSent = user.Status.OnboardingEmailSent || onboardingEmailSent
-	if onboardingEmailSentAt != nil {
-		user.Status.OnboardingEmailSentAt = onboardingEmailSentAt
+	user.Status.OnboardingLinkCreated = user.Status.OnboardingLinkCreated || onboarding.LinkCreated
+	user.Status.OnboardingEmailSent = user.Status.OnboardingEmailSent || onboarding.EmailSent
+	if onboarding.EmailSentAt != nil {
+		user.Status.OnboardingEmailSentAt = onboarding.EmailSentAt
 	}
 
-	meta.SetStatusCondition(&user.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionTrue,
-		Reason:             "Synced",
-		Message:            "User synced successfully",
-		ObservedGeneration: user.Generation,
-	})
+	setSyncedCondition(&user.Status.Conditions, user.Generation, "User synced successfully")
 
 	if err := r.Status().Update(ctx, user); err != nil {
 		return ctrl.Result{}, err
@@ -206,58 +195,13 @@ func (r *PocketIDUserReconciler) resolveOrCreateUser(ctx context.Context, apiCli
 	return pocketIDUser, nil
 }
 
-func (r *PocketIDUserReconciler) handleOnboarding(ctx context.Context, apiClient *pocketid.Client, user *pocketidv1alpha1.PocketIDUser, pocketIDUser *pocketid.User, instance *pocketidv1alpha1.PocketIDInstance) {
-	logger := log.FromContext(ctx)
-
-	secretName := r.resolveOnboardingSecretName(user)
-	if secretName == "" || user.Status.OnboardingLinkCreated {
-		return
-	}
-
-	logger.Info("Creating one-time access token", "userId", pocketIDUser.ID, "secret", secretName)
-	resp, err := apiClient.CreateOneTimeAccessToken(ctx, pocketIDUser.ID)
-	if err != nil {
-		logger.Error(err, "Failed to create one-time access token")
-		return
-	}
-
-	if resp != nil {
-		link := fmt.Sprintf("%s/login/%s", instance.Spec.AppURL, resp.Token)
-		if err := r.storeOneTimeAccessLink(ctx, user, secretName, link); err != nil {
-			logger.Error(err, "Failed to store one-time access link")
-			return
-		}
-	}
-
-	user.Status.OnboardingLinkCreated = true
-
-	if user.Spec.SendOnboardingEmail && !user.Status.OnboardingEmailSent {
-		now := metav1.Now()
-		user.Status.OnboardingEmailSent = true
-		user.Status.OnboardingEmailSentAt = &now
-	}
-}
-
-func (r *PocketIDUserReconciler) resolveOnboardingSecretName(user *pocketidv1alpha1.PocketIDUser) string {
-	if user.Spec.OneTimeAccessSecretRef != nil {
-		return user.Spec.OneTimeAccessSecretRef.Name
-	}
-	return user.Name + "-onboarding"
-}
-
 func (r *PocketIDUserReconciler) updateErrorStatus(ctx context.Context, user *pocketidv1alpha1.PocketIDUser, reason string, reconcileErr error) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Error(reconcileErr, "Reconciliation failed", "reason", reason)
 
 	user.Status.Ready = false
 	user.Status.Synced = false
-	meta.SetStatusCondition(&user.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionFalse,
-		Reason:             reason,
-		Message:            reconcileErr.Error(),
-		ObservedGeneration: user.Generation,
-	})
+	setErrorCondition(&user.Status.Conditions, user.Generation, reason, reconcileErr)
 
 	if updateErr := r.Status().Update(ctx, user); updateErr != nil {
 		logger.Error(updateErr, "Failed to update error status")
@@ -354,32 +298,6 @@ func (r *PocketIDUserReconciler) syncGroupMemberships(ctx context.Context, apiCl
 	}
 
 	return nil
-}
-
-// storeOneTimeAccessLink stores the one-time access link in a secret
-func (r *PocketIDUserReconciler) storeOneTimeAccessLink(ctx context.Context, user *pocketidv1alpha1.PocketIDUser, secretName, link string) error {
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
-			Namespace: user.Namespace,
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{
-			"ONE_TIME_ACCESS_LINK": []byte(link),
-		},
-	}
-
-	if err := controllerutil.SetControllerReference(user, secret, r.Scheme); err != nil {
-		return err
-	}
-
-	existing := &corev1.Secret{}
-	err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: user.Namespace}, existing)
-	if err != nil {
-		return r.Create(ctx, secret)
-	}
-	existing.Data = secret.Data
-	return r.Update(ctx, existing)
 }
 
 // getAPIClient creates a PocketID API client for the instance

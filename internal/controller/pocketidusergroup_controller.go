@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"time"
 
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -165,13 +164,7 @@ func (r *PocketIDUserGroupReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	group.Status.LastSyncTime = &now
 	group.Status.ObservedGeneration = group.Generation
 
-	meta.SetStatusCondition(&group.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionTrue,
-		Reason:             "Synced",
-		Message:            "User group synced successfully",
-		ObservedGeneration: group.Generation,
-	})
+	setSyncedCondition(&group.Status.Conditions, group.Generation, "User group synced successfully")
 
 	if err := r.Status().Update(ctx, group); err != nil {
 		return ctrl.Result{}, err
@@ -186,13 +179,7 @@ func (r *PocketIDUserGroupReconciler) updateErrorStatus(ctx context.Context, gro
 
 	group.Status.Ready = false
 	group.Status.Synced = false
-	meta.SetStatusCondition(&group.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionFalse,
-		Reason:             reason,
-		Message:            reconcileErr.Error(),
-		ObservedGeneration: group.Generation,
-	})
+	setErrorCondition(&group.Status.Conditions, group.Generation, reason, reconcileErr)
 
 	if updateErr := r.Status().Update(ctx, group); updateErr != nil {
 		logger.Error(updateErr, "Failed to update error status")

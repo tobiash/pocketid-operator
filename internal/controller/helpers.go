@@ -27,6 +27,10 @@ func getSecret(ctx context.Context, c client.Client, name, namespace string) (*c
 
 // createAPIClient creates a PocketID API client for an instance
 func createAPIClient(ctx context.Context, c client.Client, instance *pocketidv1alpha1.PocketIDInstance) (*pocketid.Client, error) {
+	return createAPIClientWithDevDefault(ctx, c, instance, "")
+}
+
+func createAPIClientWithDevDefault(ctx context.Context, c client.Client, instance *pocketidv1alpha1.PocketIDInstance, defaultDevURL string) (*pocketid.Client, error) {
 	// Get the static API key secret
 	apiKeySecretName := instance.Name + "-api-key"
 	if instance.Spec.StaticAPIKeySecretRef != nil {
@@ -44,12 +48,21 @@ func createAPIClient(ctx context.Context, c client.Client, instance *pocketidv1a
 	}
 
 	baseURL := instance.Status.InternalURL
+	if baseURL == "" {
+		baseURL = pocketIDInternalURL(instance.Name, instance.Namespace)
+	}
 
 	if os.Getenv("KUBERNETES_SERVICE_HOST") == "" {
 		if devURL := os.Getenv("POCKETID_DEV_API_URL"); devURL != "" {
 			baseURL = devURL
+		} else if defaultDevURL != "" {
+			baseURL = defaultDevURL
 		}
 	}
 
 	return pocketid.NewClient(baseURL, apiKey), nil
+}
+
+func pocketIDInternalURL(name, namespace string) string {
+	return fmt.Sprintf("http://%s-svc.%s.svc.cluster.local", name, namespace)
 }

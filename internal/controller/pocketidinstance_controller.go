@@ -17,31 +17,25 @@ limitations under the License.
 package controller
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"os"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	pocketidv1alpha1 "github.com/tobiash/pocketid-operator/api/v1alpha1"
+	"github.com/tobiash/pocketid-operator/internal/pocketid"
 )
 
 const (
@@ -220,95 +214,33 @@ func (r *PocketIDInstanceReconciler) initializeInstance(ctx context.Context, ins
 		return nil
 	}
 
-	// Get API key from secret
-	secret := &corev1.Secret{}
-	err := r.Get(ctx, client.ObjectKey{Name: instance.Status.StaticAPIKeySecretName, Namespace: instance.Namespace}, secret)
+	apiClient, err := createAPIClientWithDevDefault(ctx, r.Client, instance, "http://localhost:1411")
 	if err != nil {
-		return fmt.Errorf("failed to get secret for initialization: %w", err)
-	}
-	apiKey := string(secret.Data["STATIC_API_KEY"])
-
-	// Determine API URL
-	// For production/in-cluster: use service name
-	// For local development: might need localhost if port-forwarded
-	baseUrl := fmt.Sprintf("http://%s-svc.%s.svc.cluster.local", instance.Name, instance.Namespace)
-
-	// Small hack for local dev visibility: if it fails, try localhost:1411 if we are likely running locally
-	// In a real operator, you'd handle this via cluster networking or specific config
-	client := &http.Client{Timeout: 5 * time.Second}
-
-	// Check if we should use dev API URL (when not running in cluster)
-	if os.Getenv("KUBERNETES_SERVICE_HOST") == "" {
-		if devURL := os.Getenv("POCKETID_DEV_API_URL"); devURL != "" {
-			baseUrl = devURL
-		}
+		return fmt.Errorf("failed to create API client for initialization: %w", err)
 	}
 
-	// 1. Check if users exist
-	req, err := http.NewRequestWithContext(ctx, "GET", baseUrl+"/api/users", nil)
+	users, err := apiClient.ListUsers(ctx)
 	if err != nil {
-		return err
-	}
-	req.Header.Set("X-API-Key", apiKey)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		// If unreachable, we might be running locally. Try localhost fallback as a courtesy for this session.
-		baseUrl = "http://localhost:1411"
-		req, _ = http.NewRequestWithContext(ctx, "GET", baseUrl+"/api/users", nil)
-		req.Header.Set("X-API-Key", apiKey)
-		resp, err = client.Do(req)
-		if err != nil {
-			return fmt.Errorf("instance API unreachable at %s: %w", baseUrl, err)
-		}
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to check users, status: %d", resp.StatusCode)
+		return fmt.Errorf("failed to list users for initialization: %w", err)
 	}
 
-	var usersResp struct {
-		Data []interface{} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&usersResp); err != nil {
-		return fmt.Errorf("failed to decode users response: %w", err)
-	}
-
-	// 2. If no users, create admin
-	if len(usersResp.Data) == 0 {
+	if len(users) == 0 {
 		logger.Info("Initializing instance with admin user", "user", instance.Spec.InitialAdmin.Username)
-		adminData := map[string]interface{}{
-			"username":    instance.Spec.InitialAdmin.Username,
-			"email":       instance.Spec.InitialAdmin.Email,
-			"firstName":   instance.Spec.InitialAdmin.FirstName,
-			"displayName": instance.Spec.InitialAdmin.DisplayName,
-			"isAdmin":     true,
+		admin := &pocketid.User{
+			Username:    instance.Spec.InitialAdmin.Username,
+			Email:       &instance.Spec.InitialAdmin.Email,
+			FirstName:   instance.Spec.InitialAdmin.FirstName,
+			DisplayName: instance.Spec.InitialAdmin.DisplayName,
+			IsAdmin:     true,
 		}
-		body, _ := json.Marshal(adminData)
-		req, err = http.NewRequestWithContext(ctx, "POST", baseUrl+"/api/users", bytes.NewBuffer(body))
-		if err != nil {
-			return err
-		}
-		req.Header.Set("X-API-Key", apiKey)
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err = client.Do(req)
-		if err != nil {
+		if err := apiClient.CreateUserWithoutResult(ctx, admin); err != nil {
 			return fmt.Errorf("failed to create admin: %w", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusCreated {
-			bodyBytes, _ := io.ReadAll(resp.Body)
-			return fmt.Errorf("failed to create admin, status: %d, body: %s", resp.StatusCode, string(bodyBytes))
 		}
 		logger.Info("Initial admin created successfully")
 	} else {
 		logger.Info("Instance already has users, skipping initialization")
 	}
 
-	// 3. Mark as initialized
 	meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
 		Type:               "Initialized",
 		Status:             metav1.ConditionTrue,
@@ -322,34 +254,13 @@ func (r *PocketIDInstanceReconciler) initializeInstance(ctx context.Context, ins
 
 func (r *PocketIDInstanceReconciler) reconcileConfigMap(ctx context.Context, instance *pocketidv1alpha1.PocketIDInstance) error {
 	configMapName := fmt.Sprintf("%s-config", instance.Name)
-
-	desired := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      configMapName,
-			Namespace: instance.Namespace,
-		},
-		Data: map[string]string{
-			"APP_URL":          instance.Spec.AppURL,
-			"TRUST_PROXY":      fmt.Sprintf("%t", instance.Spec.TrustProxy),
-			"SESSION_DURATION": fmt.Sprintf("%d", instance.Spec.SessionDuration),
-			"DB_PROVIDER":      instance.Spec.Database.Provider,
-		},
-	}
-
-	// Add SMTP config if present
-	if instance.Spec.SMTP != nil {
-		desired.Data["SMTP_HOST"] = instance.Spec.SMTP.Host
-		desired.Data["SMTP_PORT"] = fmt.Sprintf("%d", instance.Spec.SMTP.Port)
-		desired.Data["SMTP_FROM"] = instance.Spec.SMTP.From
-		desired.Data["SMTP_TLS"] = fmt.Sprintf("%t", instance.Spec.SMTP.TLS)
-	}
-
-	if err := controllerutil.SetControllerReference(instance, desired, r.Scheme); err != nil {
+	desired, err := desiredInstanceConfigMap(instance, ownerSetter(instance, r.Scheme))
+	if err != nil {
 		return err
 	}
 
 	existing := &corev1.ConfigMap{}
-	err := r.Get(ctx, client.ObjectKey{Namespace: instance.Namespace, Name: configMapName}, existing)
+	err = r.Get(ctx, client.ObjectKey{Namespace: instance.Namespace, Name: configMapName}, existing)
 	if apierrors.IsNotFound(err) {
 		return r.Create(ctx, desired)
 	} else if err != nil {
@@ -363,34 +274,13 @@ func (r *PocketIDInstanceReconciler) reconcileConfigMap(ctx context.Context, ins
 
 func (r *PocketIDInstanceReconciler) reconcileService(ctx context.Context, instance *pocketidv1alpha1.PocketIDInstance) error {
 	serviceName := fmt.Sprintf("%s-svc", instance.Name)
-
-	desired := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      serviceName,
-			Namespace: instance.Namespace,
-		},
-		Spec: corev1.ServiceSpec{
-			Selector: map[string]string{
-				"app.kubernetes.io/name":     "pocketid",
-				"app.kubernetes.io/instance": instance.Name,
-			},
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "http",
-					Port:       80,
-					TargetPort: intstr.FromInt(1411),
-					Protocol:   corev1.ProtocolTCP,
-				},
-			},
-		},
-	}
-
-	if err := controllerutil.SetControllerReference(instance, desired, r.Scheme); err != nil {
+	desired, err := desiredInstanceService(instance, ownerSetter(instance, r.Scheme))
+	if err != nil {
 		return err
 	}
 
 	existing := &corev1.Service{}
-	err := r.Get(ctx, client.ObjectKey{Namespace: instance.Namespace, Name: serviceName}, existing)
+	err = r.Get(ctx, client.ObjectKey{Namespace: instance.Namespace, Name: serviceName}, existing)
 	if apierrors.IsNotFound(err) {
 		return r.Create(ctx, desired)
 	} else if err != nil {
@@ -405,141 +295,13 @@ func (r *PocketIDInstanceReconciler) reconcileService(ctx context.Context, insta
 
 func (r *PocketIDInstanceReconciler) reconcileStatefulSet(ctx context.Context, instance *pocketidv1alpha1.PocketIDInstance) error {
 	stsName := instance.Name
-	configMapName := fmt.Sprintf("%s-config", instance.Name)
-	encryptionSecretName := fmt.Sprintf("%s-encryption-key", instance.Name)
-	apiKeySecretName := fmt.Sprintf("%s-api-key", instance.Name)
-
-	// Use provided secret refs or defaults
-	if instance.Spec.EncryptionKeySecretRef != nil {
-		encryptionSecretName = instance.Spec.EncryptionKeySecretRef.Name
-	}
-	if instance.Spec.StaticAPIKeySecretRef != nil {
-		apiKeySecretName = instance.Spec.StaticAPIKeySecretRef.Name
-	}
-
-	replicas := int32(1)
-	if instance.Spec.Replicas != nil {
-		replicas = *instance.Spec.Replicas
-	}
-
-	image := "ghcr.io/pocket-id/pocket-id:latest"
-	if instance.Spec.Image != "" {
-		image = instance.Spec.Image
-	}
-
-	labels := map[string]string{
-		"app.kubernetes.io/name":       "pocketid",
-		"app.kubernetes.io/instance":   instance.Name,
-		"app.kubernetes.io/managed-by": "pocketid-operator",
-	}
-
-	desired := &appsv1.StatefulSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      stsName,
-			Namespace: instance.Namespace,
-		},
-		Spec: appsv1.StatefulSetSpec{
-			Replicas:    &replicas,
-			ServiceName: fmt.Sprintf("%s-svc", instance.Name),
-			Selector: &metav1.LabelSelector{
-				MatchLabels: labels,
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "pocketid",
-							Image: image,
-							Ports: []corev1.ContainerPort{
-								{
-									Name:          "http",
-									ContainerPort: 1411,
-									Protocol:      corev1.ProtocolTCP,
-								},
-							},
-							EnvFrom: []corev1.EnvFromSource{
-								{
-									ConfigMapRef: &corev1.ConfigMapEnvSource{
-										LocalObjectReference: corev1.LocalObjectReference{
-											Name: configMapName,
-										},
-									},
-								},
-								{
-									SecretRef: &corev1.SecretEnvSource{
-										LocalObjectReference: corev1.LocalObjectReference{
-											Name: encryptionSecretName,
-										},
-									},
-								},
-								{
-									SecretRef: &corev1.SecretEnvSource{
-										LocalObjectReference: corev1.LocalObjectReference{
-											Name: apiKeySecretName,
-										},
-									},
-								},
-							},
-							Resources: instance.Spec.Resources,
-							ReadinessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									HTTPGet: &corev1.HTTPGetAction{
-										Path: "/healthz",
-										Port: intstr.FromInt(1411),
-									},
-								},
-								InitialDelaySeconds: 30,
-								PeriodSeconds:       10,
-							},
-							LivenessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									HTTPGet: &corev1.HTTPGetAction{
-										Path: "/healthz",
-										Port: intstr.FromInt(1411),
-									},
-								},
-								InitialDelaySeconds: 45,
-								PeriodSeconds:       20,
-							},
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      "data",
-									MountPath: "/app/data",
-								},
-							},
-						},
-					},
-				},
-			},
-			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "data",
-					},
-					Spec: corev1.PersistentVolumeClaimSpec{
-						AccessModes: []corev1.PersistentVolumeAccessMode{
-							corev1.ReadWriteOnce,
-						},
-						Resources: corev1.VolumeResourceRequirements{
-							Requests: corev1.ResourceList{
-								corev1.ResourceStorage: mustParseQuantity(instance.Spec.Storage.PVC),
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	if err := controllerutil.SetControllerReference(instance, desired, r.Scheme); err != nil {
+	desired, err := desiredInstanceStatefulSet(instance, ownerSetter(instance, r.Scheme))
+	if err != nil {
 		return err
 	}
 
 	existing := &appsv1.StatefulSet{}
-	err := r.Get(ctx, client.ObjectKey{Namespace: instance.Namespace, Name: stsName}, existing)
+	err = r.Get(ctx, client.ObjectKey{Namespace: instance.Namespace, Name: stsName}, existing)
 	if apierrors.IsNotFound(err) {
 		return r.Create(ctx, desired)
 	} else if err != nil {
@@ -661,16 +423,4 @@ func generateRandomKey(length int) string {
 		panic(err)
 	}
 	return hex.EncodeToString(bytes)
-}
-
-func mustParseQuantity(pvc *pocketidv1alpha1.PVCConfig) resource.Quantity {
-	size := "1Gi"
-	if pvc != nil && pvc.Size != "" {
-		size = pvc.Size
-	}
-	q, err := resource.ParseQuantity(size)
-	if err != nil {
-		q, _ = resource.ParseQuantity("1Gi")
-	}
-	return q
 }
