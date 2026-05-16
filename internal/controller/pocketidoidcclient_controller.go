@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -70,7 +71,12 @@ func (r *PocketIDOIDCClientReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 
-	pocketIDClient, err := r.resolveOrCreateClient(ctx, apiClient, oidcClient)
+	allowedUserGroups, err := r.resolveAllowedUserGroups(ctx, oidcClient, instance)
+	if err != nil {
+		return r.updateOIDCGroupReferenceErrorStatus(ctx, oidcClient, err)
+	}
+
+	pocketIDClient, err := r.resolveOrCreateClient(ctx, apiClient, oidcClient, allowedUserGroups)
 	if err != nil {
 		return r.updateErrorStatus(ctx, oidcClient, "ClientSyncFailed", err)
 	}
@@ -122,7 +128,7 @@ func (r *PocketIDOIDCClientReconciler) handleDeletion(ctx context.Context, oidcC
 	return ctrl.Result{}, nil
 }
 
-func (r *PocketIDOIDCClientReconciler) resolveOrCreateClient(ctx context.Context, apiClient *pocketid.Client, oidcClient *pocketidv1alpha1.PocketIDOIDCClient) (*pocketid.OIDCClient, error) {
+func (r *PocketIDOIDCClientReconciler) resolveOrCreateClient(ctx context.Context, apiClient *pocketid.Client, oidcClient *pocketidv1alpha1.PocketIDOIDCClient, allowedUserGroups []pocketid.UserGroupMinimal) (*pocketid.OIDCClient, error) {
 	var pocketIDClient *pocketid.OIDCClient
 
 	if oidcClient.Status.ClientID != "" {
@@ -145,11 +151,13 @@ func (r *PocketIDOIDCClientReconciler) resolveOrCreateClient(ctx context.Context
 	}
 
 	targetClient := &pocketid.OIDCClient{
-		Name:         oidcClient.Spec.Name,
-		ID:           oidcClient.Spec.ClientID,
-		IsPublic:     oidcClient.Spec.IsPublic,
-		PkceEnabled:  oidcClient.Spec.PKCEEnabled,
-		CallbackURLs: oidcClient.Spec.CallbackURLs,
+		Name:              oidcClient.Spec.Name,
+		ID:                oidcClient.Spec.ClientID,
+		IsPublic:          oidcClient.Spec.IsPublic,
+		PkceEnabled:       oidcClient.Spec.PKCEEnabled,
+		CallbackURLs:      oidcClient.Spec.CallbackURLs,
+		IsGroupRestricted: len(allowedUserGroups) > 0,
+		AllowedUserGroups: allowedUserGroups,
 	}
 
 	if pocketIDClient == nil {
@@ -175,6 +183,57 @@ func (r *PocketIDOIDCClientReconciler) resolveOrCreateClient(ctx context.Context
 	}
 
 	return pocketIDClient, nil
+}
+
+func (r *PocketIDOIDCClientReconciler) resolveAllowedUserGroups(ctx context.Context, oidcClient *pocketidv1alpha1.PocketIDOIDCClient, instance *pocketidv1alpha1.PocketIDInstance) ([]pocketid.UserGroupMinimal, error) {
+	if len(oidcClient.Spec.AllowedUserGroupRefs) == 0 {
+		return []pocketid.UserGroupMinimal{}, nil
+	}
+
+	allowedUserGroups := make([]pocketid.UserGroupMinimal, 0, len(oidcClient.Spec.AllowedUserGroupRefs))
+	for _, ref := range oidcClient.Spec.AllowedUserGroupRefs {
+		group := &pocketidv1alpha1.PocketIDUserGroup{}
+		if err := r.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: oidcClient.Namespace}, group); err != nil {
+			return nil, oidcGroupReferenceError{reason: "UserGroupNotFound", err: fmt.Errorf("referenced user group %s/%s not found: %w", oidcClient.Namespace, ref.Name, err)}
+		}
+
+		groupInstance, err := ResolveInstanceReference(ctx, r.Client, group.Spec.InstanceRef, group.Namespace)
+		if err != nil {
+			return nil, oidcGroupReferenceError{reason: "UserGroupInstanceNotFound", err: fmt.Errorf("failed to resolve instance for user group %s/%s: %w", group.Namespace, group.Name, err)}
+		}
+		if groupInstance.Name != instance.Name || groupInstance.Namespace != instance.Namespace {
+			return nil, oidcGroupReferenceError{reason: "UserGroupInstanceMismatch", err: fmt.Errorf("referenced user group %s/%s belongs to instance %s/%s, not %s/%s", group.Namespace, group.Name, groupInstance.Namespace, groupInstance.Name, instance.Namespace, instance.Name)}
+		}
+
+		if group.Status.GroupID == "" {
+			return nil, oidcGroupReferenceError{reason: "UserGroupNotReady", err: fmt.Errorf("referenced user group %s/%s is not ready: status.groupId is empty", group.Namespace, group.Name)}
+		}
+
+		allowedUserGroups = append(allowedUserGroups, pocketid.UserGroupMinimal{
+			ID:           group.Status.GroupID,
+			Name:         group.Spec.Name,
+			FriendlyName: group.Spec.FriendlyName,
+		})
+	}
+
+	return allowedUserGroups, nil
+}
+
+type oidcGroupReferenceError struct {
+	reason string
+	err    error
+}
+
+func (e oidcGroupReferenceError) Error() string { return e.err.Error() }
+func (e oidcGroupReferenceError) Unwrap() error { return e.err }
+
+func (r *PocketIDOIDCClientReconciler) updateOIDCGroupReferenceErrorStatus(ctx context.Context, oidcClient *pocketidv1alpha1.PocketIDOIDCClient, err error) (ctrl.Result, error) {
+	reason := "UserGroupReferenceFailed"
+	var groupRefErr oidcGroupReferenceError
+	if ok := errors.As(err, &groupRefErr); ok {
+		reason = groupRefErr.reason
+	}
+	return r.updateErrorStatus(ctx, oidcClient, reason, err)
 }
 
 func (r *PocketIDOIDCClientReconciler) ensureCredentialsSecret(ctx context.Context, apiClient *pocketid.Client, oidcClient *pocketidv1alpha1.PocketIDOIDCClient, pocketIDClient *pocketid.OIDCClient, instance *pocketidv1alpha1.PocketIDInstance) error {
@@ -259,7 +318,24 @@ func needsOIDCClientUpdate(current, target *pocketid.OIDCClient) bool {
 	return current.Name != target.Name ||
 		current.IsPublic != target.IsPublic ||
 		current.PkceEnabled != target.PkceEnabled ||
-		!equalStrings(current.CallbackURLs, target.CallbackURLs)
+		current.IsGroupRestricted != target.IsGroupRestricted ||
+		!equalStrings(current.CallbackURLs, target.CallbackURLs) ||
+		!equalUserGroupIDs(current.AllowedUserGroups, target.AllowedUserGroups)
+}
+
+func equalUserGroupIDs(a, b []pocketid.UserGroupMinimal) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	aIDs := make([]string, len(a))
+	bIDs := make([]string, len(b))
+	for i := range a {
+		aIDs[i] = a[i].ID
+	}
+	for i := range b {
+		bIDs[i] = b[i].ID
+	}
+	return equalStrings(aIDs, bIDs)
 }
 
 func equalStrings(a, b []string) bool {
