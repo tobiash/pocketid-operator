@@ -1098,6 +1098,51 @@ var _ = Describe("PocketIDOIDCClient Reconciliation", func() {
 		Expect(unrestricted.AllowedUserGroups).To(BeEmpty())
 	})
 
+	It("should mark client not ready when an accepted user group is deleted", func() {
+		createReadyGroup("printer-admins", "group-printer-admins")
+
+		oidcClient := &pocketidv1alpha1.PocketIDOIDCClient{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      clientName,
+				Namespace: namespace,
+			},
+			Spec: pocketidv1alpha1.PocketIDOIDCClientSpec{
+				Name: "Test Application",
+				InstanceRef: pocketidv1alpha1.CrossNamespaceObjectReference{
+					Name: instanceName,
+				},
+				CallbackURLs: []string{"https://example.com/callback"},
+				AllowedUserGroupRefs: []pocketidv1alpha1.LocalObjectReference{
+					{Name: "printer-admins"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, oidcClient)).To(Succeed())
+
+		_, err := reconcileOIDCClient(clientName, namespace)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(getFreshOIDCClient(clientName, namespace).Status.Ready).To(BeTrue())
+
+		group := &pocketidv1alpha1.PocketIDUserGroup{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "printer-admins", Namespace: namespace}, group)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, group)).To(Succeed())
+
+		_, err = reconcileOIDCClient(clientName, namespace)
+		Expect(err).To(HaveOccurred())
+
+		fetched := getFreshOIDCClient(clientName, namespace)
+		readyReason := ""
+		for _, condition := range fetched.Status.Conditions {
+			if condition.Type == "Ready" && condition.Status == metav1.ConditionFalse {
+				readyReason = condition.Reason
+				break
+			}
+		}
+		Expect(fetched.Status.Ready).To(BeFalse())
+		Expect(fetched.Status.Synced).To(BeFalse())
+		Expect(readyReason).To(Equal("UserGroupNotFound"))
+	})
+
 	It("should reject allowed user groups from a different PocketID instance", func() {
 		otherInstanceName := instanceName + "-other"
 		createAPIKeySecret(otherInstanceName+"-api-key", namespace)
