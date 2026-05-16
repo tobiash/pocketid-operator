@@ -193,11 +193,22 @@ func (r *PocketIDOIDCClientReconciler) resolveAllowedUserGroups(ctx context.Cont
 		return []pocketid.UserGroupMinimal{}, nil
 	}
 
+	var groups pocketidv1alpha1.PocketIDUserGroupList
+	if err := r.List(ctx, &groups, client.InNamespace(oidcClient.Namespace)); err != nil {
+		return nil, oidcGroupReferenceError{reason: "UserGroupListFailed", err: fmt.Errorf("failed to list user groups in namespace %s: %w", oidcClient.Namespace, err)}
+	}
+
+	groupsByName := make(map[string]*pocketidv1alpha1.PocketIDUserGroup, len(groups.Items))
+	for i := range groups.Items {
+		group := &groups.Items[i]
+		groupsByName[group.Name] = group
+	}
+
 	allowedUserGroups := make([]pocketid.UserGroupMinimal, 0, len(oidcClient.Spec.AllowedUserGroupRefs))
 	for _, ref := range oidcClient.Spec.AllowedUserGroupRefs {
-		group := &pocketidv1alpha1.PocketIDUserGroup{}
-		if err := r.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: oidcClient.Namespace}, group); err != nil {
-			return nil, oidcGroupReferenceError{reason: "UserGroupNotFound", err: fmt.Errorf("referenced user group %s/%s not found: %w", oidcClient.Namespace, ref.Name, err)}
+		group, ok := groupsByName[ref.Name]
+		if !ok {
+			return nil, oidcGroupReferenceError{reason: "UserGroupNotFound", err: fmt.Errorf("referenced user group %s/%s not found", oidcClient.Namespace, ref.Name)}
 		}
 
 		groupInstance, err := ResolveInstanceReference(ctx, r.Client, group.Spec.InstanceRef, group.Namespace)
