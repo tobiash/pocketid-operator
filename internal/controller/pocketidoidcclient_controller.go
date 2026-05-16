@@ -11,10 +11,13 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	pocketidv1alpha1 "github.com/tobiash/pocketid-operator/api/v1alpha1"
 	"github.com/tobiash/pocketid-operator/internal/pocketid"
@@ -356,8 +359,33 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 
+func (r *PocketIDOIDCClientReconciler) oidcClientsReferencingUserGroup(ctx context.Context, obj client.Object) []reconcile.Request {
+	group, ok := obj.(*pocketidv1alpha1.PocketIDUserGroup)
+	if !ok {
+		return nil
+	}
+
+	var oidcClients pocketidv1alpha1.PocketIDOIDCClientList
+	if err := r.List(ctx, &oidcClients, client.InNamespace(group.Namespace)); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list OIDC clients for user group watch", "group", client.ObjectKeyFromObject(group))
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0)
+	for _, oidcClient := range oidcClients.Items {
+		for _, ref := range oidcClient.Spec.AllowedUserGroupRefs {
+			if ref.Name == group.Name {
+				requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Name: oidcClient.Name, Namespace: oidcClient.Namespace}})
+				break
+			}
+		}
+	}
+	return requests
+}
+
 func (r *PocketIDOIDCClientReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&pocketidv1alpha1.PocketIDOIDCClient{}).
+		Watches(&pocketidv1alpha1.PocketIDUserGroup{}, handler.EnqueueRequestsFromMapFunc(r.oidcClientsReferencingUserGroup)).
 		Complete(r)
 }
