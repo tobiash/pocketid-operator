@@ -1044,6 +1044,54 @@ var _ = Describe("PocketIDOIDCClient Reconciliation", func() {
 		}))
 	})
 
+	It("should update OIDC client when referenced user group ID changes", func() {
+		createReadyGroup("printer-admins", "group-printer-admins")
+
+		oidcClient := &pocketidv1alpha1.PocketIDOIDCClient{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      clientName,
+				Namespace: namespace,
+			},
+			Spec: pocketidv1alpha1.PocketIDOIDCClientSpec{
+				Name: "Test Application",
+				InstanceRef: pocketidv1alpha1.CrossNamespaceObjectReference{
+					Name: instanceName,
+				},
+				CallbackURLs: []string{"https://example.com/callback"},
+				AllowedUserGroupRefs: []pocketidv1alpha1.LocalObjectReference{
+					{Name: "printer-admins"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, oidcClient)).To(Succeed())
+
+		_, err := reconcileOIDCClient(clientName, namespace)
+		Expect(err).NotTo(HaveOccurred())
+
+		created, ok := mockServer.OIDCClientByName("Test Application")
+		Expect(ok).To(BeTrue())
+		Expect(created.AllowedUserGroups).To(ConsistOf(UserGroupMinimalDto{
+			ID:   "group-printer-admins",
+			Name: "printer-admins",
+		}))
+
+		group := &pocketidv1alpha1.PocketIDUserGroup{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "printer-admins", Namespace: namespace}, group)).To(Succeed())
+		group.Status.GroupID = "group-printer-admins-v2"
+		Expect(k8sClient.Status().Update(ctx, group)).To(Succeed())
+
+		_, err = reconcileOIDCClient(clientName, namespace)
+		Expect(err).NotTo(HaveOccurred())
+
+		updated, ok := mockServer.OIDCClientByName("Test Application")
+		Expect(ok).To(BeTrue())
+		Expect(updated.AllowedUserGroups).To(ConsistOf(UserGroupMinimalDto{
+			ID:   "group-printer-admins-v2",
+			Name: "printer-admins",
+		}))
+		Expect(mockServer.CallLog()).To(ContainElement(ContainSubstring("PUT /api/oidc/clients/")))
+	})
+
 	It("should update OIDC client when allowed user groups change", func() {
 		createReadyGroup("printer-admins", "group-printer-admins")
 		createReadyGroup("family", "group-family")
