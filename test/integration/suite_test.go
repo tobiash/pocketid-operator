@@ -671,7 +671,7 @@ func createTestInstance(name, namespace string) {
 	Expect(err).NotTo(HaveOccurred())
 }
 
-func createAPIKeySecret(name, namespace, apiKey string) {
+func createAPIKeySecret(name, namespace string) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -679,7 +679,7 @@ func createAPIKeySecret(name, namespace, apiKey string) {
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
-			"STATIC_API_KEY": []byte(apiKey),
+			"STATIC_API_KEY": []byte("test-api-key"),
 		},
 	}
 	err := k8sClient.Create(ctx, secret)
@@ -809,7 +809,7 @@ var _ = Describe("PocketIDUser Reconciliation", func() {
 		err := k8sClient.Create(ctx, ns)
 		Expect(err).NotTo(HaveOccurred())
 
-		createAPIKeySecret(secretName, namespace, "test-api-key")
+		createAPIKeySecret(secretName, namespace)
 		createTestInstance(instanceName, namespace)
 	})
 
@@ -952,7 +952,7 @@ var _ = Describe("PocketIDOIDCClient Reconciliation", func() {
 		err := k8sClient.Create(ctx, ns)
 		Expect(err).NotTo(HaveOccurred())
 
-		createAPIKeySecret(secretName, namespace, "test-api-key")
+		createAPIKeySecret(secretName, namespace)
 		createTestInstance(instanceName, namespace)
 	})
 
@@ -1100,7 +1100,7 @@ var _ = Describe("PocketIDOIDCClient Reconciliation", func() {
 
 	It("should reject allowed user groups from a different PocketID instance", func() {
 		otherInstanceName := instanceName + "-other"
-		createAPIKeySecret(otherInstanceName+"-api-key", namespace, "test-api-key")
+		createAPIKeySecret(otherInstanceName+"-api-key", namespace)
 		createTestInstance(otherInstanceName, namespace)
 
 		group := &pocketidv1alpha1.PocketIDUserGroup{
@@ -1273,7 +1273,7 @@ var _ = Describe("PocketIDUserGroup Reconciliation", func() {
 		err := k8sClient.Create(ctx, ns)
 		Expect(err).NotTo(HaveOccurred())
 
-		createAPIKeySecret(secretName, namespace, "test-api-key")
+		createAPIKeySecret(secretName, namespace)
 		createTestInstance(instanceName, namespace)
 	})
 

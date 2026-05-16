@@ -188,7 +188,6 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	} else {
 		// Update if needed
 		// For now, simple overwrite of spec fields we manage
-		existing.Spec.Name = desired.Spec.Name
 		existing.Spec.CallbackURLs = desired.Spec.CallbackURLs
 		existing.Spec.InstanceRef = desired.Spec.InstanceRef
 		existing.Spec.AllowedUserGroupRefs = desired.Spec.AllowedUserGroupRefs
