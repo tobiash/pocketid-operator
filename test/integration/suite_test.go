@@ -41,7 +41,7 @@ type MockServer struct {
 	mu          sync.RWMutex
 	users       map[string]UserDto
 	groups      map[string]UserGroupDto
-	oidcClients map[string]OidcClientDto
+	oidcClients map[string]OidcClientWithAllowedUserGroupsDto
 
 	errors  map[string]error
 	delays  map[string]time.Duration
@@ -93,7 +93,8 @@ type OidcClientDto struct {
 
 type OidcClientCreateDto struct {
 	OidcClientDto
-	ID string `json:"id"`
+	ID                string                `json:"id"`
+	AllowedUserGroups []UserGroupMinimalDto `json:"allowedUserGroups"`
 }
 
 type OidcClientWithAllowedUserGroupsDto struct {
@@ -146,7 +147,7 @@ func NewMockServer() *MockServer {
 	m := &MockServer{
 		users:       make(map[string]UserDto),
 		groups:      make(map[string]UserGroupDto),
-		oidcClients: make(map[string]OidcClientDto),
+		oidcClients: make(map[string]OidcClientWithAllowedUserGroupsDto),
 		errors:      make(map[string]error),
 		delays:      make(map[string]time.Duration),
 	}
@@ -162,7 +163,7 @@ func (m *MockServer) Reset() {
 	defer m.mu.Unlock()
 	m.users = make(map[string]UserDto)
 	m.groups = make(map[string]UserGroupDto)
-	m.oidcClients = make(map[string]OidcClientDto)
+	m.oidcClients = make(map[string]OidcClientWithAllowedUserGroupsDto)
 	m.errors = make(map[string]error)
 	m.delays = make(map[string]time.Duration)
 	m.callLog = nil
@@ -184,6 +185,17 @@ func (m *MockServer) CallLog() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return slices.Clone(m.callLog)
+}
+
+func (m *MockServer) OIDCClientByName(name string) (OidcClientWithAllowedUserGroupsDto, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, c := range m.oidcClients {
+		if c.Name == name {
+			return c, true
+		}
+	}
+	return OidcClientWithAllowedUserGroupsDto{}, false
 }
 
 func (m *MockServer) Close() {
@@ -223,6 +235,9 @@ func (m *MockServer) handler() http.HandlerFunc {
 			m.listOIDCClients(w, r)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/oidc/clients":
 			m.createOIDCClient(w, r)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/oidc/clients/"):
+			id := strings.TrimPrefix(r.URL.Path, "/api/oidc/clients/")
+			m.getOIDCClient(w, r, id)
 		case r.Method == http.MethodPost &&
 			strings.HasSuffix(r.URL.Path, "/secret") &&
 			strings.Contains(r.URL.Path, "/oidc/clients/"):
@@ -410,7 +425,7 @@ func (m *MockServer) listOIDCClients(w http.ResponseWriter, _ *http.Request) {
 	m.mu.RLock()
 	clients := make([]OidcClientDto, 0, len(m.oidcClients))
 	for _, c := range m.oidcClients {
-		clients = append(clients, c)
+		clients = append(clients, c.OidcClientDto)
 	}
 	m.mu.RUnlock()
 
@@ -456,14 +471,36 @@ func (m *MockServer) createOIDCClient(w http.ResponseWriter, r *http.Request) {
 		IsGroupRestricted:  input.IsGroupRestricted,
 	}
 
+	created := OidcClientWithAllowedUserGroupsDto{
+		OidcClientDto:     client,
+		AllowedUserGroups: input.AllowedUserGroups,
+	}
+
 	m.mu.Lock()
-	m.oidcClients[id] = client
+	m.oidcClients[id] = created
 	m.mu.Unlock()
 
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(OidcClientWithAllowedUserGroupsDto{
-		OidcClientDto: client,
-	})
+	json.NewEncoder(w).Encode(created)
+}
+
+func (m *MockServer) getOIDCClient(w http.ResponseWriter, _ *http.Request, id string) {
+	m.checkDelay("GetOIDCClient")
+	if err := m.checkError("GetOIDCClient"); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	m.mu.RLock()
+	client, ok := m.oidcClients[id]
+	m.mu.RUnlock()
+
+	if !ok {
+		http.Error(w, "client not found", http.StatusNotFound)
+		return
+	}
+
+	json.NewEncoder(w).Encode(client)
 }
 
 func (m *MockServer) generateClientSecret(w http.ResponseWriter, _ *http.Request, id string) {
@@ -506,23 +543,25 @@ func (m *MockServer) updateOIDCClient(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	m.oidcClients[id] = OidcClientDto{
-		OidcClientMetaDataDto: OidcClientMetaDataDto{
-			ID:                       id,
-			Name:                     input.Name,
-			RequiresReauthentication: input.RequiresReauthentication,
+	updated := OidcClientWithAllowedUserGroupsDto{
+		OidcClientDto: OidcClientDto{
+			OidcClientMetaDataDto: OidcClientMetaDataDto{
+				ID:                       id,
+				Name:                     input.Name,
+				RequiresReauthentication: input.RequiresReauthentication,
+			},
+			CallbackURLs:       input.CallbackURLs,
+			LogoutCallbackURLs: input.LogoutCallbackURLs,
+			IsPublic:           input.IsPublic,
+			PkceEnabled:        input.PkceEnabled,
+			IsGroupRestricted:  input.IsGroupRestricted,
 		},
-		CallbackURLs:       input.CallbackURLs,
-		LogoutCallbackURLs: input.LogoutCallbackURLs,
-		IsPublic:           input.IsPublic,
-		PkceEnabled:        input.PkceEnabled,
-		IsGroupRestricted:  input.IsGroupRestricted,
+		AllowedUserGroups: input.AllowedUserGroups,
 	}
+	m.oidcClients[id] = updated
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(OidcClientWithAllowedUserGroupsDto{
-		OidcClientDto: m.oidcClients[id],
-	})
+	json.NewEncoder(w).Encode(updated)
 }
 
 func (m *MockServer) deleteOIDCClient(w http.ResponseWriter, _ *http.Request, id string) {
@@ -632,7 +671,7 @@ func createTestInstance(name, namespace string) {
 	Expect(err).NotTo(HaveOccurred())
 }
 
-func createAPIKeySecret(name, namespace, apiKey string) {
+func createAPIKeySecret(name, namespace string) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -640,7 +679,7 @@ func createAPIKeySecret(name, namespace, apiKey string) {
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
-			"STATIC_API_KEY": []byte(apiKey),
+			"STATIC_API_KEY": []byte("test-api-key"),
 		},
 	}
 	err := k8sClient.Create(ctx, secret)
@@ -770,7 +809,7 @@ var _ = Describe("PocketIDUser Reconciliation", func() {
 		err := k8sClient.Create(ctx, ns)
 		Expect(err).NotTo(HaveOccurred())
 
-		createAPIKeySecret(secretName, namespace, "test-api-key")
+		createAPIKeySecret(secretName, namespace)
 		createTestInstance(instanceName, namespace)
 	})
 
@@ -913,9 +952,27 @@ var _ = Describe("PocketIDOIDCClient Reconciliation", func() {
 		err := k8sClient.Create(ctx, ns)
 		Expect(err).NotTo(HaveOccurred())
 
-		createAPIKeySecret(secretName, namespace, "test-api-key")
+		createAPIKeySecret(secretName, namespace)
 		createTestInstance(instanceName, namespace)
 	})
+
+	createReadyGroup := func(name, pocketIDGroupID string) {
+		group := &pocketidv1alpha1.PocketIDUserGroup{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: namespace,
+			},
+			Spec: pocketidv1alpha1.PocketIDUserGroupSpec{
+				InstanceRef: pocketidv1alpha1.CrossNamespaceObjectReference{Name: instanceName},
+				Name:        name,
+			},
+		}
+		Expect(k8sClient.Create(ctx, group)).To(Succeed())
+		group.Status.GroupID = pocketIDGroupID
+		group.Status.Ready = true
+		group.Status.Synced = true
+		Expect(k8sClient.Status().Update(ctx, group)).To(Succeed())
+	}
 
 	AfterEach(func() {
 		cleanupOIDCClient(clientName, namespace)
@@ -952,6 +1009,289 @@ var _ = Describe("PocketIDOIDCClient Reconciliation", func() {
 		calls := mockServer.CallLog()
 		Expect(calls).To(ContainElement("POST /api/oidc/clients"))
 		Expect(calls).To(ContainElement(ContainSubstring("/secret")))
+	})
+
+	It("should create OIDC client with allowed user groups", func() {
+		createReadyGroup("printer-admins", "group-printer-admins")
+
+		oidcClient := &pocketidv1alpha1.PocketIDOIDCClient{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      clientName,
+				Namespace: namespace,
+			},
+			Spec: pocketidv1alpha1.PocketIDOIDCClientSpec{
+				Name: "Test Application",
+				InstanceRef: pocketidv1alpha1.CrossNamespaceObjectReference{
+					Name: instanceName,
+				},
+				CallbackURLs: []string{"https://example.com/callback"},
+				AllowedUserGroupRefs: []pocketidv1alpha1.LocalObjectReference{
+					{Name: "printer-admins"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, oidcClient)).To(Succeed())
+
+		_, err := reconcileOIDCClient(clientName, namespace)
+		Expect(err).NotTo(HaveOccurred())
+
+		created, ok := mockServer.OIDCClientByName("Test Application")
+		Expect(ok).To(BeTrue())
+		Expect(created.IsGroupRestricted).To(BeTrue())
+		Expect(created.AllowedUserGroups).To(ConsistOf(UserGroupMinimalDto{
+			ID:   "group-printer-admins",
+			Name: "printer-admins",
+		}))
+	})
+
+	It("should update OIDC client when referenced user group ID changes", func() {
+		createReadyGroup("printer-admins", "group-printer-admins")
+
+		oidcClient := &pocketidv1alpha1.PocketIDOIDCClient{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      clientName,
+				Namespace: namespace,
+			},
+			Spec: pocketidv1alpha1.PocketIDOIDCClientSpec{
+				Name: "Test Application",
+				InstanceRef: pocketidv1alpha1.CrossNamespaceObjectReference{
+					Name: instanceName,
+				},
+				CallbackURLs: []string{"https://example.com/callback"},
+				AllowedUserGroupRefs: []pocketidv1alpha1.LocalObjectReference{
+					{Name: "printer-admins"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, oidcClient)).To(Succeed())
+
+		_, err := reconcileOIDCClient(clientName, namespace)
+		Expect(err).NotTo(HaveOccurred())
+
+		created, ok := mockServer.OIDCClientByName("Test Application")
+		Expect(ok).To(BeTrue())
+		Expect(created.AllowedUserGroups).To(ConsistOf(UserGroupMinimalDto{
+			ID:   "group-printer-admins",
+			Name: "printer-admins",
+		}))
+
+		group := &pocketidv1alpha1.PocketIDUserGroup{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "printer-admins", Namespace: namespace}, group)).To(Succeed())
+		group.Status.GroupID = "group-printer-admins-v2"
+		Expect(k8sClient.Status().Update(ctx, group)).To(Succeed())
+
+		_, err = reconcileOIDCClient(clientName, namespace)
+		Expect(err).NotTo(HaveOccurred())
+
+		updated, ok := mockServer.OIDCClientByName("Test Application")
+		Expect(ok).To(BeTrue())
+		Expect(updated.AllowedUserGroups).To(ConsistOf(UserGroupMinimalDto{
+			ID:   "group-printer-admins-v2",
+			Name: "printer-admins",
+		}))
+		Expect(mockServer.CallLog()).To(ContainElement(ContainSubstring("PUT /api/oidc/clients/")))
+	})
+
+	It("should update OIDC client when allowed user groups change", func() {
+		createReadyGroup("printer-admins", "group-printer-admins")
+		createReadyGroup("family", "group-family")
+
+		oidcClient := &pocketidv1alpha1.PocketIDOIDCClient{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      clientName,
+				Namespace: namespace,
+			},
+			Spec: pocketidv1alpha1.PocketIDOIDCClientSpec{
+				Name: "Test Application",
+				InstanceRef: pocketidv1alpha1.CrossNamespaceObjectReference{
+					Name: instanceName,
+				},
+				CallbackURLs: []string{"https://example.com/callback"},
+				AllowedUserGroupRefs: []pocketidv1alpha1.LocalObjectReference{
+					{Name: "printer-admins"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, oidcClient)).To(Succeed())
+
+		_, err := reconcileOIDCClient(clientName, namespace)
+		Expect(err).NotTo(HaveOccurred())
+
+		fetched := getFreshOIDCClient(clientName, namespace)
+		fetched.Spec.AllowedUserGroupRefs = []pocketidv1alpha1.LocalObjectReference{{Name: "family"}}
+		Expect(k8sClient.Update(ctx, fetched)).To(Succeed())
+
+		_, err = reconcileOIDCClient(clientName, namespace)
+		Expect(err).NotTo(HaveOccurred())
+
+		updated, ok := mockServer.OIDCClientByName("Test Application")
+		Expect(ok).To(BeTrue())
+		Expect(updated.IsGroupRestricted).To(BeTrue())
+		Expect(updated.AllowedUserGroups).To(ConsistOf(UserGroupMinimalDto{
+			ID:   "group-family",
+			Name: "family",
+		}))
+		Expect(mockServer.CallLog()).To(ContainElement(ContainSubstring("PUT /api/oidc/clients/")))
+
+		fetched = getFreshOIDCClient(clientName, namespace)
+		fetched.Spec.AllowedUserGroupRefs = nil
+		Expect(k8sClient.Update(ctx, fetched)).To(Succeed())
+
+		_, err = reconcileOIDCClient(clientName, namespace)
+		Expect(err).NotTo(HaveOccurred())
+
+		unrestricted, ok := mockServer.OIDCClientByName("Test Application")
+		Expect(ok).To(BeTrue())
+		Expect(unrestricted.IsGroupRestricted).To(BeFalse())
+		Expect(unrestricted.AllowedUserGroups).To(BeEmpty())
+	})
+
+	It("should mark client not ready when an accepted user group is deleted", func() {
+		createReadyGroup("printer-admins", "group-printer-admins")
+
+		oidcClient := &pocketidv1alpha1.PocketIDOIDCClient{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      clientName,
+				Namespace: namespace,
+			},
+			Spec: pocketidv1alpha1.PocketIDOIDCClientSpec{
+				Name: "Test Application",
+				InstanceRef: pocketidv1alpha1.CrossNamespaceObjectReference{
+					Name: instanceName,
+				},
+				CallbackURLs: []string{"https://example.com/callback"},
+				AllowedUserGroupRefs: []pocketidv1alpha1.LocalObjectReference{
+					{Name: "printer-admins"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, oidcClient)).To(Succeed())
+
+		_, err := reconcileOIDCClient(clientName, namespace)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(getFreshOIDCClient(clientName, namespace).Status.Ready).To(BeTrue())
+
+		group := &pocketidv1alpha1.PocketIDUserGroup{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "printer-admins", Namespace: namespace}, group)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, group)).To(Succeed())
+
+		_, err = reconcileOIDCClient(clientName, namespace)
+		Expect(err).To(HaveOccurred())
+
+		fetched := getFreshOIDCClient(clientName, namespace)
+		readyReason := ""
+		for _, condition := range fetched.Status.Conditions {
+			if condition.Type == "Ready" && condition.Status == metav1.ConditionFalse {
+				readyReason = condition.Reason
+				break
+			}
+		}
+		Expect(fetched.Status.Ready).To(BeFalse())
+		Expect(fetched.Status.Synced).To(BeFalse())
+		Expect(readyReason).To(Equal("UserGroupNotFound"))
+	})
+
+	It("should reject allowed user groups from a different PocketID instance", func() {
+		otherInstanceName := instanceName + "-other"
+		createAPIKeySecret(otherInstanceName+"-api-key", namespace)
+		createTestInstance(otherInstanceName, namespace)
+
+		group := &pocketidv1alpha1.PocketIDUserGroup{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "printer-admins",
+				Namespace: namespace,
+			},
+			Spec: pocketidv1alpha1.PocketIDUserGroupSpec{
+				InstanceRef: pocketidv1alpha1.CrossNamespaceObjectReference{Name: otherInstanceName},
+				Name:        "printer-admins",
+			},
+		}
+		Expect(k8sClient.Create(ctx, group)).To(Succeed())
+		group.Status.GroupID = "group-printer-admins"
+		group.Status.Ready = true
+		group.Status.Synced = true
+		Expect(k8sClient.Status().Update(ctx, group)).To(Succeed())
+
+		oidcClient := &pocketidv1alpha1.PocketIDOIDCClient{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      clientName,
+				Namespace: namespace,
+			},
+			Spec: pocketidv1alpha1.PocketIDOIDCClientSpec{
+				Name: "Test Application",
+				InstanceRef: pocketidv1alpha1.CrossNamespaceObjectReference{
+					Name: instanceName,
+				},
+				CallbackURLs: []string{"https://example.com/callback"},
+				AllowedUserGroupRefs: []pocketidv1alpha1.LocalObjectReference{
+					{Name: "printer-admins"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, oidcClient)).To(Succeed())
+
+		_, err := reconcileOIDCClient(clientName, namespace)
+		Expect(err).To(HaveOccurred())
+
+		fetched := getFreshOIDCClient(clientName, namespace)
+		readyReason := ""
+		for _, condition := range fetched.Status.Conditions {
+			if condition.Type == "Ready" && condition.Status == metav1.ConditionFalse {
+				readyReason = condition.Reason
+				break
+			}
+		}
+		Expect(readyReason).To(Equal("UserGroupInstanceMismatch"))
+		Expect(mockServer.CallLog()).NotTo(ContainElement("POST /api/oidc/clients"))
+	})
+
+	It("should wait for referenced user groups to be ready", func() {
+		group := &pocketidv1alpha1.PocketIDUserGroup{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "printer-admins",
+				Namespace: namespace,
+			},
+			Spec: pocketidv1alpha1.PocketIDUserGroupSpec{
+				InstanceRef: pocketidv1alpha1.CrossNamespaceObjectReference{Name: instanceName},
+				Name:        "printer-admins",
+			},
+		}
+		Expect(k8sClient.Create(ctx, group)).To(Succeed())
+
+		oidcClient := &pocketidv1alpha1.PocketIDOIDCClient{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      clientName,
+				Namespace: namespace,
+			},
+			Spec: pocketidv1alpha1.PocketIDOIDCClientSpec{
+				Name: "Test Application",
+				InstanceRef: pocketidv1alpha1.CrossNamespaceObjectReference{
+					Name: instanceName,
+				},
+				CallbackURLs: []string{"https://example.com/callback"},
+				AllowedUserGroupRefs: []pocketidv1alpha1.LocalObjectReference{
+					{Name: "printer-admins"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, oidcClient)).To(Succeed())
+
+		_, err := reconcileOIDCClient(clientName, namespace)
+		Expect(err).To(HaveOccurred())
+
+		fetched := getFreshOIDCClient(clientName, namespace)
+		Expect(fetched.Status.Ready).To(BeFalse())
+		Expect(fetched.Status.Synced).To(BeFalse())
+		Expect(fetched.Status.ClientID).To(BeEmpty())
+		readyReason := ""
+		for _, condition := range fetched.Status.Conditions {
+			if condition.Type == "Ready" && condition.Status == metav1.ConditionFalse {
+				readyReason = condition.Reason
+				break
+			}
+		}
+		Expect(readyReason).To(Equal("UserGroupNotReady"))
+		Expect(mockServer.CallLog()).NotTo(ContainElement("POST /api/oidc/clients"))
 	})
 
 	It("should set Ready condition when client is synced", func() {
@@ -1026,7 +1366,7 @@ var _ = Describe("PocketIDUserGroup Reconciliation", func() {
 		err := k8sClient.Create(ctx, ns)
 		Expect(err).NotTo(HaveOccurred())
 
-		createAPIKeySecret(secretName, namespace, "test-api-key")
+		createAPIKeySecret(secretName, namespace)
 		createTestInstance(instanceName, namespace)
 	})
 

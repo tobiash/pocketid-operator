@@ -1,20 +1,30 @@
 package pocketid
 
 type OIDCClient struct {
-	ID           string   `json:"id,omitempty"`
-	Name         string   `json:"name"`
-	CallbackURLs []string `json:"callbackURLs"`
-	IsPublic     bool     `json:"isPublic"`
-	PkceEnabled  bool     `json:"pkceEnabled"`
-	HasLogo      bool     `json:"hasLogo"`
+	ID                string             `json:"id,omitempty"`
+	Name              string             `json:"name"`
+	CallbackURLs      []string           `json:"callbackURLs"`
+	IsPublic          bool               `json:"isPublic"`
+	PkceEnabled       bool               `json:"pkceEnabled"`
+	IsGroupRestricted bool               `json:"isGroupRestricted"`
+	AllowedUserGroups []UserGroupMinimal `json:"allowedUserGroups"`
+	HasLogo           bool               `json:"hasLogo"`
+}
+
+type UserGroupMinimal struct {
+	ID           string `json:"id"`
+	Name         string `json:"name,omitempty"`
+	FriendlyName string `json:"friendlyName,omitempty"`
 }
 
 type OIDCClientCreate struct {
-	ID           string   `json:"id,omitempty"`
-	Name         string   `json:"name"`
-	CallbackURLs []string `json:"callbackURLs"`
-	IsPublic     bool     `json:"isPublic"`
-	PkceEnabled  bool     `json:"pkceEnabled"`
+	ID                string             `json:"id,omitempty"`
+	Name              string             `json:"name"`
+	CallbackURLs      []string           `json:"callbackURLs"`
+	IsPublic          bool               `json:"isPublic"`
+	PkceEnabled       bool               `json:"pkceEnabled"`
+	IsGroupRestricted bool               `json:"isGroupRestricted"`
+	AllowedUserGroups []UserGroupMinimal `json:"allowedUserGroups"`
 }
 
 type User struct {

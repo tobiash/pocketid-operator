@@ -38,6 +38,7 @@ const (
 	AnnotationInstance      = "pocketid.tobiash.github.io/instance"
 	AnnotationClientName    = "pocketid.tobiash.github.io/client-name"
 	AnnotationRedirectPaths = "pocketid.tobiash.github.io/redirect-paths"
+	AnnotationAllowedGroups = "pocketid.tobiash.github.io/allowed-groups"
 	AnnotationEnvoyGateway  = "pocketid.tobiash.github.io/envoy-gateway"
 )
 
@@ -140,6 +141,8 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, nil // Stop
 	}
 
+	allowedUserGroupRefs := parseAllowedGroupRefs(route.Annotations[AnnotationAllowedGroups])
+
 	// Define Desired Client
 	desired := &pocketidv1alpha1.PocketIDOIDCClient{
 		ObjectMeta: metav1.ObjectMeta{
@@ -147,10 +150,11 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			Namespace: route.Namespace,
 		},
 		Spec: pocketidv1alpha1.PocketIDOIDCClientSpec{
-			Name:         clientName,
-			InstanceRef:  instanceRef,
-			CallbackURLs: redirectURIs,
-			IsPublic:     false,
+			Name:                 clientName,
+			InstanceRef:          instanceRef,
+			CallbackURLs:         redirectURIs,
+			IsPublic:             false,
+			AllowedUserGroupRefs: allowedUserGroupRefs,
 		},
 	}
 
@@ -186,6 +190,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		// For now, simple overwrite of spec fields we manage
 		existing.Spec.CallbackURLs = desired.Spec.CallbackURLs
 		existing.Spec.InstanceRef = desired.Spec.InstanceRef
+		existing.Spec.AllowedUserGroupRefs = desired.Spec.AllowedUserGroupRefs
 		existing.Spec.EnvoyGateway = desired.Spec.EnvoyGateway
 		existing.Spec.CredentialsSecretRef = desired.Spec.CredentialsSecretRef
 		if err := r.Update(ctx, existing); err != nil {
@@ -194,6 +199,28 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func parseAllowedGroupRefs(annotation string) []pocketidv1alpha1.LocalObjectReference {
+	if annotation == "" {
+		return nil
+	}
+
+	parts := strings.Split(annotation, ",")
+	refs := make([]pocketidv1alpha1.LocalObjectReference, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		name := strings.TrimSpace(part)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		refs = append(refs, pocketidv1alpha1.LocalObjectReference{Name: name})
+	}
+	return refs
 }
 
 func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {

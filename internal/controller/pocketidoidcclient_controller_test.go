@@ -32,8 +32,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/config"
 	metrics "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	pocketidv1alpha1 "github.com/tobiash/pocketid-operator/api/v1alpha1"
 )
@@ -164,6 +167,9 @@ var _ = Describe("PocketIDOIDCClient Controller", func() {
 			Metrics:                metrics.Options{BindAddress: "0"},
 			HealthProbeBindAddress: "0",
 			LeaderElection:         false,
+			Controller: config.Controller{
+				SkipNameValidation: ptr.To(true),
+			},
 		})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -192,6 +198,55 @@ var _ = Describe("PocketIDOIDCClient Controller", func() {
 		if err := k8sClient.Get(context.Background(), types.NamespacedName{Name: clientName, Namespace: clientNs}, client); err == nil {
 			k8sClient.Delete(context.Background(), client)
 		}
+	})
+
+	It("should enqueue OIDC clients referencing a changed user group", func() {
+		groupName := "printer-admins-" + clientName
+		otherClientName := clientName + "-other"
+		defer func() {
+			_ = k8sClient.Delete(context.Background(), &pocketidv1alpha1.PocketIDOIDCClient{ObjectMeta: metav1.ObjectMeta{Name: otherClientName, Namespace: clientNs}})
+			_ = k8sClient.Delete(context.Background(), &pocketidv1alpha1.PocketIDUserGroup{ObjectMeta: metav1.ObjectMeta{Name: groupName, Namespace: clientNs}})
+		}()
+
+		group := &pocketidv1alpha1.PocketIDUserGroup{
+			ObjectMeta: metav1.ObjectMeta{Name: groupName, Namespace: clientNs},
+			Spec: pocketidv1alpha1.PocketIDUserGroupSpec{
+				InstanceRef: pocketidv1alpha1.CrossNamespaceObjectReference{Name: instanceName},
+				Name:        groupName,
+			},
+		}
+		Expect(k8sClient.Create(ctx, group)).To(Succeed())
+
+		matchingClient := &pocketidv1alpha1.PocketIDOIDCClient{
+			ObjectMeta: metav1.ObjectMeta{Name: clientName, Namespace: clientNs},
+			Spec: pocketidv1alpha1.PocketIDOIDCClientSpec{
+				Name:         "Matching App",
+				InstanceRef:  pocketidv1alpha1.CrossNamespaceObjectReference{Name: instanceName},
+				CallbackURLs: []string{"http://localhost/callback"},
+				AllowedUserGroupRefs: []pocketidv1alpha1.LocalObjectReference{
+					{Name: groupName},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, matchingClient)).To(Succeed())
+
+		otherClient := &pocketidv1alpha1.PocketIDOIDCClient{
+			ObjectMeta: metav1.ObjectMeta{Name: otherClientName, Namespace: clientNs},
+			Spec: pocketidv1alpha1.PocketIDOIDCClientSpec{
+				Name:         "Other App",
+				InstanceRef:  pocketidv1alpha1.CrossNamespaceObjectReference{Name: instanceName},
+				CallbackURLs: []string{"http://localhost/other-callback"},
+				AllowedUserGroupRefs: []pocketidv1alpha1.LocalObjectReference{
+					{Name: "other-group"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, otherClient)).To(Succeed())
+
+		expectedRequest := reconcile.Request{NamespacedName: types.NamespacedName{Name: clientName, Namespace: clientNs}}
+		Eventually(func() []reconcile.Request {
+			return testReconciler.oidcClientsReferencingUserGroup(ctx, group)
+		}, time.Second*10, time.Millisecond*250).Should(ConsistOf(expectedRequest))
 	})
 
 	It("should create OIDC Client and Secret", func() {

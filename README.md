@@ -191,6 +191,7 @@ spec:
 | `pocketid.tobiash.github.io/instance` | Instance name or `namespace/name` (auto-detected if only one instance in namespace) |
 | `pocketid.tobiash.github.io/client-name` | Override the OIDC client name (default: `<route-name>-oidc`) |
 | `pocketid.tobiash.github.io/redirect-paths` | Comma-separated callback paths (default: `/oauth2/callback`) |
+| `pocketid.tobiash.github.io/allowed-groups` | Comma-separated same-namespace `PocketIDUserGroup` names used to restrict the generated OIDC client |
 | `pocketid.tobiash.github.io/envoy-gateway` | Set to `"true"` to auto-create an Envoy Gateway SecurityPolicy |
 
 ### HTTPRoute OIDC Integration (basic)

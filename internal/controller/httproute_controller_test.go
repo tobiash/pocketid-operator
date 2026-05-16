@@ -160,6 +160,60 @@ var _ = Describe("HTTPRoute Controller", func() {
 			Expect(oidcClient.Spec.EnvoyGateway.HTTPRouteRef.Namespace).To(Equal(PocketIDNamespace))
 		})
 
+		It("Should populate and clear allowed user group refs from annotation", func() {
+			ctx := context.Background()
+
+			instance := &pocketidv1alpha1.PocketIDInstance{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pocketid-route-groups",
+					Namespace: PocketIDNamespace,
+				},
+				Spec: pocketidv1alpha1.PocketIDInstanceSpec{
+					AppURL: "https://auth-groups.example.com",
+					InitialAdmin: &pocketidv1alpha1.InitialAdminConfig{
+						Email: "admin-groups@example.com", Username: "admin-groups", FirstName: "Admin", DisplayName: "Admin Groups",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, instance)).Should(Succeed())
+
+			route := &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route-groups",
+					Namespace: PocketIDNamespace,
+					Annotations: map[string]string{
+						"pocketid.tobiash.github.io/oidc-enabled":   "true",
+						"pocketid.tobiash.github.io/instance":       "test-pocketid-route-groups",
+						"pocketid.tobiash.github.io/client-name":    "test-route-groups-oidc",
+						"pocketid.tobiash.github.io/allowed-groups": "printer-admins, family, printer-admins",
+					},
+				},
+				Spec: gatewayv1.HTTPRouteSpec{
+					Hostnames: []gatewayv1.Hostname{"groups.example.com"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, route)).Should(Succeed())
+
+			oidcClient := &pocketidv1alpha1.PocketIDOIDCClient{}
+			Eventually(func() []pocketidv1alpha1.LocalObjectReference {
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "test-route-groups-oidc", Namespace: PocketIDNamespace}, oidcClient); err != nil {
+					return nil
+				}
+				return oidcClient.Spec.AllowedUserGroupRefs
+			}, Timeout, Interval).Should(Equal([]pocketidv1alpha1.LocalObjectReference{{Name: "printer-admins"}, {Name: "family"}}))
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "test-route-groups", Namespace: PocketIDNamespace}, route)).Should(Succeed())
+			delete(route.Annotations, "pocketid.tobiash.github.io/allowed-groups")
+			Expect(k8sClient.Update(ctx, route)).Should(Succeed())
+
+			Eventually(func() []pocketidv1alpha1.LocalObjectReference {
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "test-route-groups-oidc", Namespace: PocketIDNamespace}, oidcClient); err != nil {
+					return []pocketidv1alpha1.LocalObjectReference{{Name: "missing"}}
+				}
+				return oidcClient.Spec.AllowedUserGroupRefs
+			}, Timeout, Interval).Should(BeNil())
+		})
+
 		It("Should update PocketIDOIDCClient when HTTPRoute changes", func() {
 			ctx := context.Background()
 
